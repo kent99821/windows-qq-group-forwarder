@@ -12,6 +12,7 @@
       <p class="eyebrow">LOCAL CONTROL PLANE</p>
       <h1>Windows QQ 消息转发器</h1>
       <p class="lede">监听 Windows 通知栏中的 QQ 群或联系人消息，并将文本及可取得的图片转发到 B 群官方机器人。</p>
+      <div class="header-note"><span class="header-dot"></span><span>本机运行 · Windows 专用</span><span class="header-divider">/</span><span>消息仅保存在本地队列</span></div>
     </header>
 
     <section class="panel status-panel">
@@ -19,6 +20,7 @@
       <div class="stats">
         <div><span>进程</span><strong id="process-value">—</strong></div>
         <div><span>待发送</span><strong id="pending-value">—</strong></div>
+        <div><span>发送失败</span><strong id="failed-value">—</strong></div>
         <div><span>已发送</span><strong id="sent-value">—</strong></div>
         <div><span>已废弃</span><strong id="discarded-value">—</strong></div>
       </div>
@@ -30,7 +32,7 @@
       </div>
     </section>
 
-    <section class="grid">
+    <section class="grid diagnostics-grid">
       <div class="panel">
         <p class="eyebrow">MODE</p><h2>运行模式</h2>
         <label class="toggle-row" for="dry-run">
@@ -48,8 +50,33 @@
       </div>
       <div class="panel">
         <p class="eyebrow">DESTINATION</p><h2>绑定 B 群</h2>
-        <p class="muted">停止转发后点击绑定，然后在 B 群 @机器人发送“绑定”。</p>
-        <button id="bind-button">绑定 B 群</button>
+        <p class="muted">绑定后可以真实发送一条测试消息，确认机器人主动发言权限和群配置可用。</p>
+        <div class="actions compact-actions">
+          <button id="bind-button">绑定 B 群</button>
+          <button id="test-message-button" class="primary">发送主动测试</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top: 16px;">
+      <div class="panel-heading">
+        <div><p class="eyebrow">PREFLIGHT</p><h2>运行前检查</h2></div>
+        <span id="preflight-badge" class="badge">尚未检查</span>
+      </div>
+      <p class="muted">检查配置、机器人连接、QQ 客户端、通知权限、图片缓存及本地目录。启动转发时也会自动执行。</p>
+      <div class="preflight-toolbar">
+        <button id="preflight-button" class="primary"><span class="button-label">开始检查</span></button>
+        <span id="preflight-last-check" class="panel-meta">尚未执行</span>
+      </div>
+      <div id="preflight-progress" class="progress-row" hidden aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="preflight-progress-text">正在检查运行条件，请稍候…</span>
+      </div>
+      <div id="preflight-summary" class="preflight-summary" hidden aria-live="polite"></div>
+      <div id="preflight-results" class="check-columns" hidden>
+        <div class="check-column passed-column"><h3>符合</h3><div id="preflight-passed"></div></div>
+        <div class="check-column missing-column"><h3>缺少或异常</h3><div id="preflight-missing"></div></div>
+        <div class="check-column warning-column"><h3>提示</h3><div id="preflight-warnings"></div></div>
       </div>
     </section>
 
@@ -68,11 +95,41 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section class="grid replay-grid">
+      <div class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">RETRY</p><h2>重试发送失败消息</h2></div><span id="failed-count" class="panel-meta">—</span></div>
+        <p class="muted">达到最大重试次数的消息会停在失败队列，不再无限重复请求。停止服务后可选择重新发送。</p>
+        <div class="actions compact-actions">
+          <button id="view-failed-button">查看失败消息</button>
+          <button id="retry-all-failed-button" class="primary">全部重新发送</button>
+        </div>
+      </div>
+      <div class="panel">
+        <p class="eyebrow">HISTORY REPLAY</p><h2>从 QQ 窗口补发</h2>
+        <p class="muted">停止服务后，打开指定会话并读取当前可见聊天记录，再勾选漏掉的消息。图片记录暂按 [图片] 占位补发。</p>
+        <div class="history-controls">
+          <select id="history-listener-select" aria-label="选择 QQ 会话"></select>
+          <button id="preview-history-button" class="primary">查看历史消息</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- replay controls are defined above -->
+
+    <section class="panel" style="margin-top: 16px;">
       <div class="panel-heading"><div><p class="eyebrow">LOG</p><h2>最近日志</h2></div><button id="refresh-log">刷新</button></div>
       <pre id="log-output">暂无日志</pre>
     </section>
     <p id="toast" class="toast" role="status"></p>
+    <dialog id="replay-dialog" class="replay-dialog">
+      <div class="panel-heading"><h2 id="replay-dialog-title">选择消息</h2><button id="replay-dialog-close">关闭</button></div>
+      <p id="replay-dialog-summary" class="muted"></p>
+      <div id="replay-dialog-list" class="replay-dialog-list"></div>
+      <div class="actions dialog-actions">
+        <button id="replay-select-all">全选</button>
+        <button id="replay-confirm" class="primary">将选中消息加入待发送</button>
+      </div>
+    </dialog>
   </main>
   <script src="/app.js"></script>
 </body>
