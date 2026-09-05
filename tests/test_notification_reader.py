@@ -1,5 +1,5 @@
 from app.config import SourceConfig
-from app.source.windows_notification import WindowsNotificationReader
+from app.source.windows_notification import _UserNotificationListenerBackend, WindowsNotificationReader
 
 
 class FakeControl:
@@ -8,6 +8,29 @@ class FakeControl:
 
     def window_text(self) -> str:
         return self._text
+
+
+class FakeTextElement:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class FakeBinding:
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = texts
+
+    def get_text_elements(self) -> list[FakeTextElement]:
+        return [FakeTextElement(text) for text in self._texts]
+
+
+class FakeNotificationVisual:
+    def __init__(self, texts: list[str]) -> None:
+        self.bindings = [FakeBinding(texts)]
+
+
+class FakeNotification:
+    def __init__(self, texts: list[str]) -> None:
+        self.notification = type("Notification", (), {"visual": FakeNotificationVisual(texts)})()
 
 
 class FakeRectangle:
@@ -45,6 +68,49 @@ def test_notification_candidate_uses_group_and_body() -> None:
     assert result is not None
     assert result[3] == "[特别关心] 家欣：哈哈"
     assert result[2] == "发家致富"
+
+
+def test_winrt_parser_keeps_duplicate_messages_in_one_notification() -> None:
+    notification = FakeNotification([
+        "发家致富",
+        "家欣：在吗",
+        "家欣：在吗",
+    ])
+
+    assert _UserNotificationListenerBackend._notification_texts(notification) == [
+        "发家致富",
+        "家欣：在吗",
+        "家欣：在吗",
+    ]
+
+
+def test_poll_emits_duplicate_messages_from_one_aggregated_toast() -> None:
+    reader = WindowsNotificationReader(source_config())
+    reader._primed = True
+    reader._scan = lambda: [  # type: ignore[method-assign]
+        ("winrt:QQ:99:item:0", "QQ", "发家致富", "家欣：在吗", "UserNotification"),
+        ("winrt:QQ:99:item:1", "QQ", "发家致富", "家欣：在吗", "UserNotification"),
+    ]
+
+    messages = reader.poll()
+
+    assert [message.content for message in messages] == ["家欣：在吗", "家欣：在吗"]
+
+
+def test_poll_emits_different_messages_when_one_notification_id_is_updated() -> None:
+    reader = WindowsNotificationReader(source_config())
+    scans = iter([
+        [("winrt:QQ:99:item:0", "QQ", "发家致富", "家欣：你好", "UserNotification")],
+        [("winrt:QQ:99:item:0", "QQ", "发家致富", "家欣：在吗", "UserNotification")],
+    ])
+    reader._primed = True
+    reader._scan = lambda: next(scans)  # type: ignore[method-assign]
+
+    first = reader.poll()
+    second = reader.poll()
+
+    assert [message.content for message in first] == ["家欣：你好"]
+    assert [message.content for message in second] == ["家欣：在吗"]
 
 
 def test_notification_message_has_toast_kind() -> None:

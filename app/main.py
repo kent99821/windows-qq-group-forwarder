@@ -73,6 +73,152 @@ async def process_pending(config: AppConfig, store: StateStore, sender: Official
                 await asyncio.sleep(min(2 ** (attempt - 1), 10))
 
 
+async def collect_notifications(
+    reader: WindowsNotificationReader,
+    output: asyncio.Queue[list[IncomingMessage]],
+    poll_interval_seconds: float,
+) -> None:
+    """持续采集通知；发送和图片处理变慢时也不会暂停读取。"""
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            # WinRT 对象可能绑定创建它的 COM 线程；读取在该线程执行，
+            # 避免把 UserNotificationListener 跨线程传入线程池。
+            messages = reader.poll()
+            if messages:
+                await output.put(messages)
+        except RuntimeError as exc:
+            logger.warning("本轮 Windows 通知读取失败：%s", exc)
+        await asyncio.to_thread(reader.wait_for_change, poll_interval_seconds)
+
+
+def enqueue_message(store: StateStore, message: IncomingMessage) -> bool:
+    logger = logging.getLogger(__name__)
+    if store.enqueue(message):
+        logger.info(
+            "监听到新消息 source_group=%s kind=%s content=%s",
+            message.source_group,
+            message.kind,
+            message.content,
+        )
+        if message.kind == "toast_image_notice":
+            logger.warning("图片通知不含可匹配的原图，仅转发 [图片] 占位提示")
+        return True
+    logger.debug(
+        "忽略重复消息 source_group=%s kind=%s content=%s",
+        message.source_group,
+        message.kind,
+        message.content,
+    )
+    return False
+
+
+async def route_notification_batches(
+    input_queue: asyncio.Queue[list[IncomingMessage]],
+    image_queue: asyncio.Queue[list[IncomingMessage]],
+    store: StateStore,
+    send_signal: asyncio.Event,
+) -> None:
+    """文本立即入库，图片交给独立处理任务，避免图片阻塞文本监听。"""
+    while True:
+        messages = await input_queue.get()
+        try:
+            image_messages = [message for message in messages if message.kind == "toast_image_notice"]
+            text_messages = [message for message in messages if message.kind != "toast_image_notice"]
+            enqueued = any(enqueue_message(store, message) for message in text_messages)
+            if enqueued:
+                send_signal.set()
+            if image_messages:
+                await image_queue.put(image_messages)
+        finally:
+            input_queue.task_done()
+
+
+async def process_image_batches(
+    config: AppConfig,
+    image_queue: asyncio.Queue[list[IncomingMessage]],
+    image_cache: QqImageCache,
+    window_image_reader: QqWindowImageReader,
+    store: StateStore,
+    send_signal: asyncio.Event,
+) -> None:
+    logger = logging.getLogger(__name__)
+    staging_dir = config.runtime.database_path.parent / "image-cache"
+    while True:
+        messages = await image_queue.get()
+        try:
+            captured_by_key: dict[str, Path | None] = {}
+            grouped_images: dict[str, list[IncomingMessage]] = {}
+            for message in messages:
+                grouped_images.setdefault(message.source_group, []).append(message)
+            for source_group, group_messages in grouped_images.items():
+                captured_images = await asyncio.to_thread(
+                    window_image_reader.capture_many,
+                    [message.message_key for message in group_messages],
+                    staging_dir,
+                    source_group,
+                )
+                captured_by_key.update({
+                    message.message_key: path
+                    for message, path in zip(group_messages, captured_images)
+                })
+
+            enqueued = False
+            for message in messages:
+                staged_image = captured_by_key.get(message.message_key)
+                if staged_image is not None:
+                    message = replace(message, kind="image", media_path=str(staged_image))
+                    logger.info("图片消息已通过 QQ 窗口复制并加入发送队列 path=%s", staged_image)
+                else:
+                    cached_image = await asyncio.to_thread(image_cache.find_for_notification)
+                    if cached_image is not None:
+                        try:
+                            staged_image = await asyncio.to_thread(
+                                image_cache.stage,
+                                cached_image,
+                                message.message_key,
+                                staging_dir,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "QQ 图片缓存匹配成功但暂存失败，将回退为占位提示 error=%s",
+                                type(exc).__name__,
+                            )
+                        else:
+                            message = replace(message, kind="image", media_path=str(staged_image))
+                            logger.info("图片消息已通过 QQ 缓存取得原图并加入发送队列 path=%s", staged_image)
+                    else:
+                        logger.warning("图片原图未取得，加入 [图片] 占位提示队列")
+                enqueued = enqueue_message(store, message) or enqueued
+            if enqueued:
+                send_signal.set()
+        finally:
+            image_queue.task_done()
+
+
+async def send_pending_forever(
+    config: AppConfig,
+    store: StateStore,
+    sender: OfficialQqBotSender | None,
+    send_signal: asyncio.Event,
+) -> None:
+    logger = logging.getLogger(__name__)
+    last_pending_count = -1
+    while True:
+        try:
+            await asyncio.wait_for(send_signal.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        send_signal.clear()
+        if config.runtime.dry_run:
+            pending_count = store.count("pending")
+            if pending_count != last_pending_count:
+                logger.info("dry-run：当前待发送队列 %d 条，未调用 B 群机器人", pending_count)
+                last_pending_count = pending_count
+        else:
+            await process_pending(config, store, sender)
+
+
 async def run(config: AppConfig, *, dry_run: bool = False) -> None:
     logger = logging.getLogger(__name__)
     if dry_run:
@@ -89,7 +235,10 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
         sender: OfficialQqBotSender | None = None
         gateway_stop = asyncio.Event()
         gateway_task: asyncio.Task[None] | None = None
-        last_pending_count = -1
+        notification_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        image_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        send_signal = asyncio.Event()
+        worker_tasks: list[asyncio.Task[None]] = []
         try:
             reader.prime()
             image_cache.prime()
@@ -103,71 +252,39 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                 reader.backend_name,
                 config.runtime.dry_run,
             )
-            while True:
-                try:
-                    messages = reader.poll()
-                    image_messages = [message for message in messages if message.kind == "toast_image_notice"]
-                    staging_dir = config.runtime.database_path.parent / "image-cache"
-                    captured_by_key: dict[str, Path | None] = {}
-                    grouped_images: dict[str, list[IncomingMessage]] = {}
-                    for message in image_messages:
-                        grouped_images.setdefault(message.source_group, []).append(message)
-                    for source_group, group_messages in grouped_images.items():
-                        captured_images = window_image_reader.capture_many(
-                            [message.message_key for message in group_messages],
-                            staging_dir,
-                            source_group,
-                        )
-                        captured_by_key.update({
-                            message.message_key: path
-                            for message, path in zip(group_messages, captured_images)
-                        })
-                    for message in messages:
-                        if message.kind == "toast_image_notice":
-                            staged_image = captured_by_key.get(message.message_key)
-                            if staged_image is not None:
-                                message = replace(message, kind="image", media_path=str(staged_image))
-                                logger.info("图片消息已通过 QQ 窗口复制并加入发送队列 path=%s", staged_image)
-                            else:
-                                # UI 自动化失败时仍保留缓存探测作为低干扰回退。
-                                cached_image = image_cache.find_for_notification()
-                                if cached_image is not None:
-                                    try:
-                                        staged_image = image_cache.stage(cached_image, message.message_key, staging_dir)
-                                    except Exception as exc:
-                                        logger.warning("QQ 图片缓存匹配成功但暂存失败，将回退为占位提示 error=%s", type(exc).__name__)
-                                    else:
-                                        message = replace(message, kind="image", media_path=str(staged_image))
-                                        logger.info("图片消息已通过 QQ 缓存取得原图并加入发送队列 path=%s", staged_image)
-                                else:
-                                    logger.warning("图片原图未取得，加入 [图片] 占位提示队列")
-                        if store.enqueue(message):
-                            logger.info(
-                                "监听到新消息 source_group=%s kind=%s content=%s",
-                                message.source_group,
-                                message.kind,
-                                message.content,
-                            )
-                            if message.kind == "toast_image_notice":
-                                logger.warning("图片通知不含可匹配的原图，仅转发 [图片] 占位提示")
-                        else:
-                            logger.debug(
-                                "忽略重复消息 source_group=%s kind=%s content=%s",
-                                message.source_group,
-                                message.kind,
-                                message.content,
-                            )
-                    if config.runtime.dry_run:
-                        pending_count = store.count("pending")
-                        if pending_count != last_pending_count:
-                            logger.info("dry-run：当前待发送队列 %d 条，未调用 B 群机器人", pending_count)
-                            last_pending_count = pending_count
-                    else:
-                        await process_pending(config, store, sender)
-                except RuntimeError as exc:
-                    logger.warning("本轮 Windows 通知读取失败：%s", exc)
-                await asyncio.sleep(config.source.poll_interval_seconds)
+            send_signal.set()
+            worker_tasks = [
+                asyncio.create_task(
+                    collect_notifications(reader, notification_queue, config.source.poll_interval_seconds),
+                    name="qq-notification-collector",
+                ),
+                asyncio.create_task(
+                    route_notification_batches(notification_queue, image_queue, store, send_signal),
+                    name="qq-notification-router",
+                ),
+                asyncio.create_task(
+                    process_image_batches(
+                        config,
+                        image_queue,
+                        image_cache,
+                        window_image_reader,
+                        store,
+                        send_signal,
+                    ),
+                    name="qq-image-processor",
+                ),
+                asyncio.create_task(
+                    send_pending_forever(config, store, sender, send_signal),
+                    name="qq-message-sender",
+                ),
+            ]
+            await asyncio.gather(*worker_tasks)
         finally:
+            for task in worker_tasks:
+                task.cancel()
+            if worker_tasks:
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
+            reader.close()
             gateway_stop.set()
             if gateway_task is not None:
                 try:

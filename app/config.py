@@ -86,7 +86,7 @@ def load_config(path: Path) -> AppConfig:
     assert isinstance(destination, dict)
     assert isinstance(runtime, dict)
 
-    interval = source.get("poll_interval_seconds", 1.0)
+    interval = source.get("poll_interval_seconds", 0.2)
     attempts = runtime.get("max_send_attempts", 3)
     if not isinstance(interval, (int, float)) or interval <= 0:
         raise ValueError("poll_interval_seconds 必须是正数")

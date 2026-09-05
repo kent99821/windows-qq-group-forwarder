@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter, deque
+import threading
 import time
-from collections import Counter
 from typing import Any
 from uuid import uuid4
 
@@ -42,6 +43,16 @@ class _UserNotificationListenerBackend:
                 f"Windows UserNotificationListener 权限不可用（{status_name}）；将回退 UI Automation"
             )
         self.config = config
+        self._event_lock = threading.Lock()
+        self._event_candidates: deque[Candidate] = deque()
+        self._event_signal = threading.Event()
+        self._event_sequence = 0
+        self._event_token: Any | None = None
+        try:
+            self._event_token = self._listener.add_notification_changed(self._on_notification_changed)
+            LOGGER.info("Windows NotificationChanged 事件监听已启用")
+        except Exception as exc:
+            LOGGER.warning("Windows 通知事件监听不可用，将使用快速轮询：%s", type(exc).__name__)
 
     @staticmethod
     def _notification_texts(notification: Any) -> list[str]:
@@ -60,7 +71,9 @@ class _UserNotificationListenerBackend:
                     value = normalize_text(element.text)
                 except Exception:
                     continue
-                if value and value not in values:
+                # 不能按文本去重：QQ 可能把连续发送的相同正文聚合在同一
+                # 条通知中，重复文本分别代表两条消息，必须保留出现次数。
+                if value:
                     values.append(value)
         return values
 
@@ -72,7 +85,63 @@ class _UserNotificationListenerBackend:
         except Exception:
             return ""
 
+    def _candidate_items_from_notification(self, notification: Any, identity: str) -> list[Candidate]:
+        app = self._app_name(notification)
+        texts = self._notification_texts(notification)
+        if not app or not texts:
+            return []
+        return WindowsNotificationReader._candidate_items_from_texts(
+            self.config,
+            identity,
+            app,
+            texts,
+            "UserNotification",
+        )
+
+    def _on_notification_changed(self, _sender: Any, args: Any) -> None:
+        """在通知变更事件中立即保存内容，避免下一次轮询前被覆盖。"""
+        try:
+            notification_id = int(args.user_notification_id)
+            notification = self._listener.get_notification(notification_id)
+            if notification is None:
+                return
+            app = self._app_name(notification)
+            if not app:
+                return
+            with self._event_lock:
+                self._event_sequence += 1
+                sequence = self._event_sequence
+            identity = f"winrt-event:{app}:{notification_id}:{sequence}"
+            candidates = self._candidate_items_from_notification(notification, identity)
+            if not candidates:
+                return
+            with self._event_lock:
+                self._event_candidates.extend(candidates)
+                self._event_signal.set()
+        except Exception:
+            # 删除通知等事件可能已经无法读取对应对象，快照轮询仍会兜底。
+            return
+
+    def wait_for_change(self, timeout: float) -> None:
+        self._event_signal.wait(max(0.0, timeout))
+        self._event_signal.clear()
+
+    def close(self) -> None:
+        token = self._event_token
+        self._event_token = None
+        if token is None:
+            return
+        try:
+            self._listener.remove_notification_changed(token)
+        except Exception:
+            pass
+
     def scan(self) -> list[Candidate]:
+        with self._event_lock:
+            if self._event_candidates:
+                results = list(self._event_candidates)
+                self._event_candidates.clear()
+                return results
         try:
             notifications = self._listener.get_notifications_async(
                 self._notification_kinds.TOAST
@@ -82,24 +151,13 @@ class _UserNotificationListenerBackend:
 
         results: list[Candidate] = []
         for notification in notifications:
-            app = self._app_name(notification)
-            texts = self._notification_texts(notification)
-            if not app or not texts:
-                continue
             try:
                 notification_id = int(notification.id)
             except (AttributeError, TypeError, ValueError):
                 continue
+            app = self._app_name(notification)
             identity = f"winrt:{app}:{notification_id}"
-            results.extend(
-                WindowsNotificationReader._candidate_items_from_texts(
-                    self.config,
-                    identity,
-                    app,
-                    texts,
-                    "UserNotification",
-                )
-            )
+            results.extend(self._candidate_items_from_notification(notification, identity))
         return results
 
 
@@ -134,6 +192,16 @@ class WindowsNotificationReader:
     @property
     def backend_name(self) -> str:
         return self._backend_name
+
+    def wait_for_change(self, timeout: float) -> None:
+        if self._api_backend is not None:
+            self._api_backend.wait_for_change(timeout)
+            return
+        time.sleep(max(0.0, timeout))
+
+    def close(self) -> None:
+        if self._api_backend is not None:
+            self._api_backend.close()
 
     @staticmethod
     def _small_window(window: Any) -> bool:

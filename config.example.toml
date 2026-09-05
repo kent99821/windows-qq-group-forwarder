@@ -5,7 +5,8 @@ listener_names = ["A群名称", "联系人昵称"]
 group_name = "A群名称"
 group_names = ["A群名称", "联系人昵称"]
 app_name_contains = "QQ"
-poll_interval_seconds = 1.0
+# 通知事件优先唤醒；事件不可用时使用 200ms 快速轮询。
+poll_interval_seconds = 0.2
 # 这些文本不会被当作聊天消息。可以按 inspect-window 输出继续增加。
 exclude_texts = ["A群名称", "发送", "关闭", "最小化"]
 # 可选：QQ 图片缓存目录。留空时自动探测常见的 QQ NT 缓存目录。

@@ -16,7 +16,7 @@ B 群
 
 ## 重要限制
 
-这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目通过 Windows `UserNotificationListener` API 读取系统通知历史；API 不可用或没有返回可匹配通知、但屏幕上存在可见通知时，自动回退到 Windows UI Automation。图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
+这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目通过 Windows `UserNotificationListener` API 读取系统通知历史，并优先使用通知变化事件、事件不可用时使用 200ms 快速轮询；API 不可用或没有返回可匹配通知、但屏幕上存在可见通知时，自动回退到 Windows UI Automation。通知采集、图片处理和机器人发送相互独立，避免发送或图片处理阻塞后续通知读取。图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
 
 - 只能读取 Windows 通知栏中实际出现的实时通知；
 - `UserNotificationListener` 读取的是 Windows 通知记录，不是 QQ 服务器消息；服务启动时会把已有通知作为基线，不会补发启动前的通知；
@@ -40,7 +40,7 @@ py -3.12 -m venv .venv
 Copy-Item config.example.toml config.toml
 ```
 
-项目优先使用 Windows `UserNotificationListener` API。首次使用或权限变化后，请在 Windows 设置中允许应用访问通知；如果该 API 返回权限不足，程序会自动使用 UI Automation 读取可见通知。运行 `inspect-window` 后，输出中的 `backend` 应为 `windows-user-notification-listener`，表示当前使用的是 API。
+项目优先使用 Windows `UserNotificationListener` API。首次使用或权限变化后，请在 Windows 设置中允许应用访问通知；如果通知变化事件不可用，程序会自动使用 200ms 快速轮询；如果 API 返回权限不足，则使用 UI Automation 读取可见通知。运行 `inspect-window` 后，输出中的 `backend` 应为 `windows-user-notification-listener`，表示当前使用的是 API。
 
 运行测试时额外安装开发依赖：
 
@@ -106,6 +106,7 @@ QQ 窗口需要保持登录，Windows 不能锁屏。复制图片时可能影响
 ```toml
 [source]
 image_cache_paths = ["C:/Users/你的用户名/Documents/Tencent Files/你的QQ号/nt_qq/nt_data/Pic"]
+poll_interval_seconds = 0.2
 image_cache_match_seconds = 60.0
 image_cache_settle_seconds = 0.25
 image_cache_wait_seconds = 45.0
@@ -176,7 +177,8 @@ Get-CimInstance Win32_Process |
 
 已包含：
 
-- Windows `UserNotificationListener` API 读取 QQ 通知记录，不读取 QQ 聊天主窗口；API 不可用时回退到 UI Automation；
+- Windows `UserNotificationListener` API 读取 QQ 通知记录，不读取 QQ 聊天主窗口；通知变化事件不可用时使用 200ms 快速轮询，API 不可用时回退到 UI Automation；
+- 通知采集、图片处理和机器人发送分离运行，减少发送延迟导致的通知丢失；
 - 使用 `listener_names` 精确过滤 QQ 群或联系人会话；
 - Windows 聚合多个 QQ 通知时只提取目标群紧邻的消息正文；
 - 短时间内容去重，避免通知控件重建导致重复转发；
