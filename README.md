@@ -106,12 +106,14 @@ QQ 窗口需要保持登录，Windows 不能锁屏。复制图片时可能影响
 ```toml
 [source]
 image_cache_paths = ["C:/Users/你的用户名/Documents/Tencent Files/你的QQ号/nt_qq/nt_data/Pic"]
-image_cache_match_seconds = 20.0
+image_cache_match_seconds = 60.0
 image_cache_settle_seconds = 0.25
-image_cache_wait_seconds = 5.0
+image_cache_wait_seconds = 45.0
 ```
 
-匹配到的图片会先复制到 `data/image-cache`，发送成功后自动删除；发送失败会保留，以便重试。程序只选择图片文件，并优先选择同一时间窗口中体积较大的文件，通常可以避开缩略图。
+匹配到的图片会先复制到 `data/image-cache`，发送成功后自动删除；发送失败会保留，以便重试。QQ NT 缓存匹配遵循以下规则：只扫描 `Pic/<月份>/Ori` 和 `Pic/<月份>/Thumb`，忽略 `OriTemp`、`ThumbTemp` 及普通图片文件；`Ori` 使用 32 位十六进制哈希文件名，`Thumb` 使用同一哈希加 `_0` 或 `_720` 后缀；同一哈希只计为一条图片，原图优先，多个候选按进入缓存的时间顺序处理。若缩略图对应的原图已在历史缓存中，也会通过共享哈希关联到原图。
+
+日志中的 `kind`、`hash`、`mtime` 和 `age_seconds` 可用于确认缓存文件类型、关联键和进入缓存的时间。缓存只能判断文件是否与当前通知时间接近，不能从哈希反推出来源群/联系人；同一张图片重复发送且 QQ 不重新写入缓存时，仍无法仅靠缓存区分两条消息。
 
 也可以单独检查缓存目录和最近图片：
 

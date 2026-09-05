@@ -14,9 +14,9 @@ class SourceConfig:
     poll_interval_seconds: float
     exclude_texts: tuple[str, ...]
     image_cache_paths: tuple[Path, ...] = ()
-    image_cache_match_seconds: float = 20.0
+    image_cache_match_seconds: float = 60.0
     image_cache_settle_seconds: float = 0.25
-    image_cache_wait_seconds: float = 5.0
+    image_cache_wait_seconds: float = 45.0
     ui_image_wait_seconds: float = 8.0
     group_names: tuple[str, ...] = ()
     listener_names: tuple[str, ...] = ()
@@ -110,9 +110,9 @@ def load_config(path: Path) -> AppConfig:
     image_cache_paths_raw = source.get("image_cache_paths", [])
     if not isinstance(image_cache_paths_raw, list) or not all(isinstance(item, str) for item in image_cache_paths_raw):
         raise ValueError("image_cache_paths 必须是字符串数组")
-    image_cache_match_seconds = source.get("image_cache_match_seconds", 20.0)
+    image_cache_match_seconds = source.get("image_cache_match_seconds", 60.0)
     image_cache_settle_seconds = source.get("image_cache_settle_seconds", 0.25)
-    image_cache_wait_seconds = source.get("image_cache_wait_seconds", 5.0)
+    image_cache_wait_seconds = source.get("image_cache_wait_seconds", 45.0)
     ui_image_wait_seconds = source.get("ui_image_wait_seconds", 8.0)
     if not isinstance(image_cache_match_seconds, (int, float)) or image_cache_match_seconds <= 0:
         raise ValueError("image_cache_match_seconds 必须是正数")

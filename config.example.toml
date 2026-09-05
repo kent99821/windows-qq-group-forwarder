@@ -11,11 +11,11 @@ exclude_texts = ["A群名称", "发送", "关闭", "最小化"]
 # 可选：QQ 图片缓存目录。留空时自动探测常见的 QQ NT 缓存目录。
 image_cache_paths = []
 # 通知时间前后允许匹配的缓存文件时间范围。
-image_cache_match_seconds = 20.0
+image_cache_match_seconds = 60.0
 # 文件刚生成时等待其写入完成的时间。
 image_cache_settle_seconds = 0.25
 # 图片通知到达后，最多持续扫描多久等待 QQ 写入缓存。
-image_cache_wait_seconds = 5.0
+image_cache_wait_seconds = 45.0
 # UI 自动打开群聊并复制图片的最长等待时间。
 ui_image_wait_seconds = 8.0
 
