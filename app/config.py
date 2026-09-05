@@ -181,6 +181,36 @@ def save_group_openid(path: Path, group_openid: str) -> None:
     temp.replace(path)
 
 
+def save_dry_run(path: Path, dry_run: bool) -> None:
+    """Update runtime.dry_run while preserving the rest of config.toml."""
+    path = path.resolve()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    runtime_start = next((index for index, line in enumerate(lines) if line.strip() == "[runtime]"), None)
+    if runtime_start is None:
+        raise ValueError("config.toml 中未找到 [runtime] 配置段")
+    runtime_end = next(
+        (index for index in range(runtime_start + 1, len(lines))
+         if lines[index].strip().startswith("[") and lines[index].strip().endswith("]")),
+        len(lines),
+    )
+    runtime_body = lines[runtime_start + 1:runtime_end]
+    newline = "\n"
+    if lines and lines[0].endswith("\r\n"):
+        newline = "\r\n"
+    replacement = f"dry_run = {'true' if dry_run else 'false'}{newline}"
+    pattern = re.compile(r"^\s*dry_run\s*=")
+    for index, line in enumerate(runtime_body):
+        if pattern.match(line):
+            runtime_body[index] = replacement
+            break
+    else:
+        runtime_body.insert(0, replacement)
+    updated_lines = lines[:runtime_start + 1] + runtime_body + lines[runtime_end:]
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text("".join(updated_lines), encoding="utf-8")
+    temp.replace(path)
+
+
 def save_listener_names(path: Path, listener_names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     """Update generic QQ conversation names while preserving the rest of config.toml."""
     normalized = tuple(dict.fromkeys(

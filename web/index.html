@@ -33,8 +33,12 @@
     <section class="grid">
       <div class="panel">
         <p class="eyebrow">MODE</p><h2>运行模式</h2>
-        <label class="switch-row"><input id="dry-run" type="checkbox" checked><span>Dry-run</span></label>
-        <p class="muted">开启时只监听通知并入队，不会向 B 群真实发送消息。</p>
+        <label class="toggle-row" for="dry-run">
+          <input id="dry-run" type="checkbox" checked>
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          <span class="toggle-label"><strong>Dry-run</strong><small id="dry-run-state">只监听，不发送</small></span>
+        </label>
+        <p id="dry-run-hint" class="muted">开启时只监听通知并入队，不会向 B 群真实发送消息。</p>
       </div>
       <div class="panel">
         <p class="eyebrow">DIAGNOSTICS</p><h2>QQ 通知诊断</h2>

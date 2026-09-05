@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.config import load_config, save_listener_names
+from app.config import load_config, save_dry_run, save_listener_names
 
 
 def write_config(path: Path) -> None:
@@ -68,3 +68,13 @@ def test_contact_name_is_a_valid_listener_name(tmp_path: Path) -> None:
 
     assert config.source.listener_names == ("联系人昵称",)
     assert config.source.group_name == "联系人昵称"
+
+
+def test_save_dry_run_updates_runtime_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    write_config(path)
+
+    save_dry_run(path, False)
+
+    assert load_config(path).runtime.dry_run is False
+    assert 'dry_run = false' in path.read_text(encoding="utf-8")

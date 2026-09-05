@@ -25,6 +25,14 @@ async function refreshStatus() {
     $("pending-value").textContent = status.messages?.pending ?? 0;
     $("sent-value").textContent = status.messages?.sent ?? 0;
     $("discarded-value").textContent = status.messages?.discarded ?? 0;
+    if (typeof status.dry_run === "boolean") {
+      $("dry-run").checked = status.dry_run;
+      $("dry-run-state").textContent = status.dry_run ? "只监听，不发送" : "真实发送到 B 群";
+    }
+    $("dry-run").disabled = running;
+    $("dry-run-hint").textContent = running
+      ? "转发服务运行中，运行模式已锁定；请先停止服务后再修改。"
+      : ($("dry-run").checked ? "开启时只监听通知并入队，不会向 B 群真实发送消息。" : "关闭后会向 B 群真实发送消息。");
     const credentialWarning = !status.client_secret_configured && !$('dry-run').checked
       ? `当前 Web 控制面未读取 ${status.client_secret_env || "机器人密钥环境变量"}，请重新启动 Web 控制面。`
       : "";
@@ -111,6 +119,25 @@ async function action(path) {
   } catch (error) { show(error.message); }
 }
 
+async function changeDryRun() {
+  const toggle = $("dry-run");
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  try {
+    const body = await request("/api/actions/dry-run", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: enabled }),
+    });
+    show("Dry-run 设置已保存，下次启动转发服务时生效");
+    await refreshStatus();
+  } catch (error) {
+    toggle.checked = !enabled;
+    show(error.message);
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
 async function refreshLog() {
   try {
     const body = await request("/api/log");
@@ -122,6 +149,7 @@ async function refreshLog() {
 $("start-button").addEventListener("click", () => action("/api/actions/start"));
 $("stop-button").addEventListener("click", () => action("/api/actions/stop"));
 $("restart-button").addEventListener("click", () => action("/api/actions/restart"));
+$("dry-run").addEventListener("change", changeDryRun);
 $("refresh-log").addEventListener("click", refreshLog);
 $("inspect-button").addEventListener("click", async () => {
   try {

@@ -51,6 +51,8 @@ def test_controller_detects_forwarder_started_elsewhere(tmp_path: Path) -> None:
         assert status["external_instance"] is True
         with pytest.raises(RuntimeError, match="已有转发服务"):
             controller.start(dry_run=True)
+        with pytest.raises(RuntimeError, match="请先停止转发服务"):
+            controller.set_dry_run(False)
     finally:
         lock.release()
 
@@ -85,6 +87,36 @@ def test_controller_reports_missing_secret_before_starting_real_mode(tmp_path: P
 
     with pytest.raises(RuntimeError, match="Web 控制面进程未读取环境变量 TEST_QQ_SECRET"):
         ForwarderController(config_path).start()
+
+
+def test_controller_saves_dry_run_mode_when_stopped(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[source]\n'''
+        f'''group_name = "联系人"\n'''
+        f'''app_name_contains = "QQ"\n'''
+        f'''poll_interval_seconds = 1.0\n'''
+        f'''exclude_texts = []\n\n'''
+        f'''[destination]\n'''
+        f'''app_id = "app"\n'''
+        f'''client_secret_env = "TEST_QQ_SECRET"\n'''
+        f'''group_openid = "group"\n'''
+        f'''message_prefix = "[转发]"\n\n'''
+        f'''[runtime]\n'''
+        f'''database_path = "{data_dir.as_posix()}/state.sqlite3"\n'''
+        f'''log_path = "{data_dir.as_posix()}/forwarder.log"\n'''
+        f'''dry_run = true\n'''
+        f'''max_send_attempts = 1\n''',
+        encoding="utf-8",
+    )
+    controller = ForwarderController(config_path)
+
+    status = controller.set_dry_run(False)
+
+    assert status["dry_run"] is False
+    assert status["restart_required"] is False
+    assert controller.config().runtime.dry_run is False
 
 
 class FakeController:

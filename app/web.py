@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .bot_gateway import bind_group
-from .config import AppConfig, load_config, save_group_openid, save_listener_names
+from .config import AppConfig, load_config, save_dry_run, save_group_openid, save_listener_names
 from .source.windows_notification import WindowsNotificationReader
 from .source.qq_image_cache import QqImageCache
 from .single_instance import SingleInstanceError, SingleInstanceLock
@@ -31,6 +31,7 @@ class ForwarderController:
         self.started_at: float | None = None
         self.last_exit_code: int | None = None
         self.last_action_error: str | None = None
+        self.active_dry_run: bool | None = None
 
     def config(self) -> AppConfig:
         return load_config(self.config_path)
@@ -42,6 +43,7 @@ class ForwarderController:
         if self.process is not None and self.process.poll() is not None:
             self.last_exit_code = self.process.returncode
             self.process = None
+            self.active_dry_run = None
 
     def _forwarder_lock_path(self) -> Path:
         try:
@@ -98,6 +100,14 @@ class ForwarderController:
                 "listener_groups": listener_names,
                 "client_secret_configured": client_secret_configured,
                 "client_secret_env": client_secret_env,
+                "dry_run": config.runtime.dry_run if config_exists and config_error is None else None,
+                "active_dry_run": self.active_dry_run if own_running else None,
+                "restart_required": (
+                    own_running
+                    and self.active_dry_run is not None
+                    and config_error is None
+                    and self.active_dry_run != config.runtime.dry_run
+                ),
                 "messages": summary,
             }
 
@@ -109,6 +119,10 @@ class ForwarderController:
                 return self.status()
             if self._forwarder_lock_is_held():
                 raise RuntimeError("检测到已有转发服务正在运行，请先关闭原转发窗口或控制台")
+            if dry_run is not None:
+                if not isinstance(dry_run, bool):
+                    raise ValueError("dry_run 必须是布尔值")
+                save_dry_run(self.config_path, dry_run)
             config = self.config()
             effective_dry_run = config.runtime.dry_run if dry_run is None else dry_run
             if not effective_dry_run and not os.environ.get(config.destination.client_secret_env):
@@ -138,6 +152,7 @@ class ForwarderController:
             # The child owns the file descriptor after spawning on Windows.
             log_handle.close()
             self.started_at = time.time()
+            self.active_dry_run = effective_dry_run
             # Surface immediate startup failures instead of reporting a false success.
             for _ in range(10):
                 if self.process.poll() is not None:
@@ -175,11 +190,23 @@ class ForwarderController:
             self.last_exit_code = process.returncode
             self.process = None
             self.started_at = None
+            self.active_dry_run = None
             return self.status()
 
     def restart(self, dry_run: bool | None = None) -> dict[str, Any]:
         self.stop()
         return self.start(dry_run=dry_run)
+
+    def set_dry_run(self, dry_run: object) -> dict[str, Any]:
+        with self.lock:
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run 必须是布尔值")
+            if self._alive() or self._forwarder_lock_is_held():
+                raise RuntimeError("请先停止转发服务，再修改运行模式")
+            save_dry_run(self.config_path, dry_run)
+            result = self.status()
+            result["restart_required"] = False
+            return result
 
     def _require_forwarder_stopped(self) -> None:
         if self._alive() or self._forwarder_lock_is_held():
@@ -315,6 +342,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 result = self.controller.stop()
             elif path == "/api/actions/restart":
                 result = self.controller.restart(body.get("dry_run"))
+            elif path == "/api/actions/dry-run":
+                result = self.controller.set_dry_run(body.get("dry_run"))
             elif path == "/api/actions/inspect-window":
                 result = self.controller.inspect_window()
             elif path == "/api/actions/inspect-image-cache":
