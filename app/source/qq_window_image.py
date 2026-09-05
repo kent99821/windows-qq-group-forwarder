@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 import time
 from typing import Any
 
 from ..config import SourceConfig
+from .qq_ui_lock import QQ_UI_LOCK
 
 
 LOGGER = logging.getLogger(__name__)
@@ -76,18 +78,64 @@ class QqWindowImageReader:
             return False
         return cls._is_qq_process_path(process_path)
 
+    @staticmethod
+    def _is_minimized(window: Any) -> bool:
+        try:
+            return bool(window.is_minimized())
+        except Exception:
+            try:
+                import win32gui
+
+                return bool(win32gui.IsIconic(int(window.handle)))
+            except Exception:
+                return False
+
+    @staticmethod
+    def _conversation_title_matches(value: str, target: str) -> bool:
+        """Match QQ's active title, including suffixes such as ``群名 (2)``."""
+        normalized_value = _normal(value)
+        normalized_target = _normal(target)
+        if normalized_value.casefold() == normalized_target.casefold():
+            return True
+        return bool(re.fullmatch(
+            rf"{re.escape(normalized_target)}\s*[\(（]\d+[\)）]",
+            normalized_value,
+            flags=re.IGNORECASE,
+        ))
+
     def _group_window(self, group_name: str | None = None) -> Any | None:
         target_group = _normal(group_name or self.config.group_name)
         candidates: list[Any] = []
-        for window in self._desktop().windows(visible_only=True):
+        for window in self._desktop().windows(visible_only=False):
             try:
                 if not self._is_qq_window(window):
                     continue
-                if self._area(window) < 300 * 300:
+                if self._area(window) < 300 * 300 and not self._is_minimized(window):
                     continue
+                window_rect = window.rectangle()
+                window_width = max(1, window_rect.right - window_rect.left)
                 title = _normal(window.window_text())
-                searchable = " ".join([title, *self._texts(window)]).casefold()
-                if target_group.casefold() in searchable:
+                active_title = self._conversation_title_matches(title, target_group)
+                if not active_title:
+                    # QQ NT versions expose the active conversation title as
+                    # Text, Group, or Button. The current Windows build uses a
+                    # Button even though it is rendered as plain header text.
+                    for control_type in ("Text", "Group", "Button"):
+                        for control in window.descendants(control_type=control_type):
+                            if not self._conversation_title_matches(control.window_text(), target_group):
+                                continue
+                            rect = control.rectangle()
+                            if (
+                                rect.left >= window_rect.left + window_width * 0.25
+                                and rect.bottom >= window_rect.top
+                                and rect.top >= window_rect.top - 10
+                                and rect.top <= window_rect.top + 120
+                            ):
+                                active_title = True
+                                break
+                        if active_title:
+                            break
+                if active_title:
                     candidates.append(window)
             except Exception:
                 continue
@@ -104,11 +152,11 @@ class QqWindowImageReader:
 
     def _qq_window(self) -> Any | None:
         candidates: list[Any] = []
-        for window in self._desktop().windows(visible_only=True):
+        for window in self._desktop().windows(visible_only=False):
             try:
                 if not self._is_qq_window(window):
                     continue
-                if self._area(window) < 300 * 300:
+                if self._area(window) < 300 * 300 and not self._is_minimized(window):
                     continue
                 title = _normal(window.window_text()).casefold()
                 class_name = _normal(getattr(window.element_info, "class_name", "")).casefold()
@@ -123,6 +171,19 @@ class QqWindowImageReader:
         return max(candidates, key=lambda window: self._area(window))
 
     @staticmethod
+    def _restore_window(window: Any) -> None:
+        try:
+            if window.is_minimized():
+                window.restore()
+                time.sleep(0.35)
+        except Exception:
+            try:
+                window.restore()
+                time.sleep(0.35)
+            except Exception:
+                pass
+
+    @staticmethod
     def _area(window: Any) -> int:
         try:
             rect = window.rectangle()
@@ -130,10 +191,105 @@ class QqWindowImageReader:
         except Exception:
             return 0
 
+    def _sidebar_conversation_control(self, window: Any, target_group: str) -> Any | None:
+        """Find an exact conversation title in QQ's left sidebar."""
+        try:
+            window_rect = window.rectangle()
+            window_width = max(1, window_rect.right - window_rect.left)
+            sidebar_right = window_rect.left + window_width * 0.34
+            candidates: list[Any] = []
+            for control in window.descendants(control_type="Text"):
+                if not self._conversation_title_matches(control.window_text(), target_group):
+                    continue
+                rect = control.rectangle()
+                if (
+                    rect.right > rect.left
+                    and rect.bottom > rect.top
+                    and rect.left < sidebar_right
+                    and rect.top >= window_rect.top + 80
+                    and rect.bottom <= window_rect.bottom
+                ):
+                    candidates.append(control)
+            if candidates:
+                return min(candidates, key=lambda control: (
+                    control.rectangle().top,
+                    control.rectangle().left,
+                ))
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _click_control_center(control: Any) -> None:
+        # click_input on QQ's accessible Text/parent Group is unreliable in
+        # some NT builds. A physical center click consistently switches chats.
+        from pywinauto import mouse
+
+        rect = control.rectangle()
+        mouse.click(
+            button="left",
+            coords=((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2),
+        )
+
+    def _sidebar_search_edit(self, window: Any) -> Any | None:
+        try:
+            window_rect = window.rectangle()
+            window_width = max(1, window_rect.right - window_rect.left)
+            sidebar_right = window_rect.left + window_width * 0.34
+            candidates = []
+            for control in window.descendants(control_type="Edit"):
+                rect = control.rectangle()
+                if (
+                    rect.right > rect.left
+                    and rect.bottom > rect.top
+                    and rect.left < sidebar_right
+                    and rect.top <= window_rect.top + 140
+                ):
+                    candidates.append(control)
+            if candidates:
+                return min(candidates, key=lambda control: control.rectangle().top)
+        except Exception:
+            return None
+        return None
+
+    def _switch_from_sidebar(self, window: Any, target_group: str) -> bool:
+        control = self._sidebar_conversation_control(window, target_group)
+        search: Any | None = None
+        if control is None:
+            search = self._sidebar_search_edit(window)
+            if search is None:
+                LOGGER.warning("QQ 左侧会话搜索框未暴露给 UI Automation")
+                return False
+            try:
+                search.set_focus()
+                search.set_edit_text(target_group)
+            except Exception:
+                return False
+            deadline = time.monotonic() + min(self.config.ui_image_wait_seconds, 4.0)
+            while time.monotonic() < deadline:
+                time.sleep(0.25)
+                control = self._sidebar_conversation_control(window, target_group)
+                if control is not None:
+                    break
+        if control is None:
+            return False
+        try:
+            self._click_control_center(control)
+            time.sleep(0.6)
+            if search is not None:
+                try:
+                    search.set_edit_text("")
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
+
     def _open_group(self, group_name: str | None = None) -> Any | None:
         target_group = _normal(group_name or self.config.group_name)
         window = self._group_window(target_group)
         if window is not None:
+            self._restore_window(window)
             try:
                 window.set_focus()
             except Exception:
@@ -143,20 +299,27 @@ class QqWindowImageReader:
         if window is None:
             LOGGER.warning("未找到可操作的 QQ 主窗口，无法自动打开群聊：%s", target_group)
             return None
+        self._restore_window(window)
         try:
             window.set_focus()
-            # QQ NT 常用 Ctrl+K 打开全局搜索；如果当前版本不支持，
-            # 后续仍会记录失败并回退，不会操作其他群聊。
-            window.type_keys("^k", set_foreground=True)
-            time.sleep(0.4)
-            edits = window.descendants(control_type="Edit")
-            if not edits:
-                LOGGER.warning("QQ 搜索框未暴露给 UI Automation")
+        except Exception:
+            pass
+        # QQ NT may expose an empty UIA tree while covered by another app.
+        # Give Chromium accessibility a moment to rebuild after activation.
+        time.sleep(0.45)
+        # A minimized QQ window exposes almost no descendants. Check again
+        # after restoring and focusing before touching the sidebar.
+        active_window = self._group_window(target_group)
+        if active_window is not None:
+            try:
+                active_window.set_focus()
+            except Exception:
+                pass
+            return active_window
+        try:
+            if not self._switch_from_sidebar(window, target_group):
+                LOGGER.warning("QQ 左侧会话列表无法切换到目标会话 group=%s", target_group)
                 return None
-            search = edits[-1]
-            search.set_focus()
-            search.set_edit_text(target_group)
-            search.type_keys("{ENTER}", set_foreground=True)
         except Exception as exc:
             LOGGER.warning("自动打开 QQ 群聊失败 group=%s error=%s", target_group, type(exc).__name__)
             return None
@@ -259,7 +422,7 @@ class QqWindowImageReader:
             time.sleep(0.25)
         return None
 
-    def capture_many(
+    def _capture_many_unlocked(
         self,
         message_keys: list[str],
         directory: Path,
@@ -298,6 +461,15 @@ class QqWindowImageReader:
                 LOGGER.warning("QQ 图片复制失败 key=%s group=%s", message_key[:12], target_group)
             results.append(result)
         return results
+
+    def capture_many(
+        self,
+        message_keys: list[str],
+        directory: Path,
+        group_name: str | None = None,
+    ) -> list[Path | None]:
+        with QQ_UI_LOCK:
+            return self._capture_many_unlocked(message_keys, directory, group_name)
 
     def capture(self, message_key: str, directory: Path, group_name: str | None = None) -> Path | None:
         """复制最新可见图片并保存；失败返回 None。"""

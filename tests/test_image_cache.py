@@ -168,3 +168,10 @@ def test_links_new_thumbnail_to_existing_original(tmp_path: Path) -> None:
 def test_browser_path_is_not_qq_process() -> None:
     assert QqWindowImageReader._is_qq_process_path(r"C:\Program Files\Google\Chrome\Application\chrome.exe") is False
     assert QqWindowImageReader._is_qq_process_path(r"C:\Program Files\Tencent\QQNT\QQ.exe") is True
+
+
+def test_active_conversation_title_allows_qq_count_suffix() -> None:
+    assert QqWindowImageReader._conversation_title_matches("发家致富", "发家致富") is True
+    assert QqWindowImageReader._conversation_title_matches("发家致富 (2)", "发家致富") is True
+    assert QqWindowImageReader._conversation_title_matches("发家致富（12）", "发家致富") is True
+    assert QqWindowImageReader._conversation_title_matches("另一个群 (2)", "发家致富") is False
