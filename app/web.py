@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -17,6 +18,10 @@ from urllib.parse import urlparse
 
 from .bot_gateway import bind_group
 from .config import AppConfig, load_config, save_dry_run, save_group_openid, save_listener_names
+from .destination.qq_bot import OfficialQqBotSender
+from .models import IncomingMessage
+from .preflight import run_preflight
+from .source.qq_history_reader import HistoryRecord, QqHistoryReader
 from .source.windows_notification import WindowsNotificationReader
 from .source.qq_image_cache import QqImageCache
 from .single_instance import SingleInstanceError, SingleInstanceLock
@@ -32,6 +37,7 @@ class ForwarderController:
         self.last_exit_code: int | None = None
         self.last_action_error: str | None = None
         self.active_dry_run: bool | None = None
+        self.history_previews: dict[str, dict[str, HistoryRecord]] = {}
 
     def config(self) -> AppConfig:
         return load_config(self.config_path)
@@ -65,7 +71,7 @@ class ForwarderController:
         with self.lock:
             self._reap()
             config_exists = self.config_path.exists()
-            summary = {"pending": 0, "sent": 0}
+            summary = {"pending": 0, "sent": 0, "failed": 0, "discarded": 0}
             listener_names: list[str] = []
             client_secret_configured = False
             client_secret_env: str | None = None
@@ -128,8 +134,12 @@ class ForwarderController:
             if not effective_dry_run and not os.environ.get(config.destination.client_secret_env):
                 raise RuntimeError(
                     f"当前 Web 控制面进程未读取环境变量 {config.destination.client_secret_env}；"
-                    "请在同一个 PowerShell 窗口重新设置密钥后重启 Web 控制面"
+                    "请重新启动 Web 控制面后再运行检查"
                 )
+            check = run_preflight(self.config_path)
+            if not check["ready"]:
+                details = "；".join(item["detail"] for item in check["missing"])
+                raise RuntimeError(f"运行前检查未通过：{details}")
             command = [sys.executable, "-m", "app.main", "run", "--config", str(self.config_path)]
             if effective_dry_run:
                 command.append("--dry-run")
@@ -208,9 +218,9 @@ class ForwarderController:
             result["restart_required"] = False
             return result
 
-    def _require_forwarder_stopped(self) -> None:
+    def _require_forwarder_stopped(self, action: str = "修改监听群列表") -> None:
         if self._alive() or self._forwarder_lock_is_held():
-            raise RuntimeError("请先停止转发服务，再修改监听群列表")
+            raise RuntimeError(f"请先停止转发服务，再{action}")
 
     def add_listener_name(self, listener_name: object) -> dict[str, Any]:
         with self.lock:
@@ -263,6 +273,161 @@ class ForwarderController:
         config = self.config()
         return QqImageCache(config.source).inspect()
 
+    def preflight(self) -> dict[str, Any]:
+        return run_preflight(self.config_path)
+
+    async def _send_test_message(self, config: AppConfig) -> None:
+        sender = OfficialQqBotSender(config.destination)
+        try:
+            await sender.start()
+            await sender.send(IncomingMessage.create(
+                f"manual-test:{time.time_ns()}",
+                "主动消息测试",
+                "QQ 主动消息测试成功。后续监听到的新消息将由本机自动转发。",
+            ))
+        finally:
+            await sender.close()
+
+    def send_test_message(self) -> dict[str, Any]:
+        config = self.config()
+        if _looks_like_unconfigured(config.destination.app_id):
+            raise RuntimeError("尚未填写有效的机器人 AppID")
+        if _looks_like_unconfigured(config.destination.group_openid):
+            raise RuntimeError("尚未绑定 B 群，请先完成 group_openid 绑定")
+        if not os.environ.get(config.destination.client_secret_env):
+            raise RuntimeError(f"未读取机器人密钥环境变量 {config.destination.client_secret_env}")
+        asyncio.run(self._send_test_message(config))
+        value = config.destination.group_openid
+        return {
+            "message": "主动测试消息已发送到 B 群",
+            "group_openid_preview": f"{value[:6]}…{value[-4:]}",
+        }
+
+    def failed_messages(self) -> dict[str, Any]:
+        config = self.config()
+        store = StateStore(config.runtime.database_path)
+        try:
+            items = [
+                {
+                    "message_key": str(row["message_key"]),
+                    "source_group": str(row["source_group"]),
+                    "sender": str(row["sender"]) if row["sender"] is not None else None,
+                    "kind": str(row["kind"]),
+                    "content": str(row["content"]),
+                    "observed_at": str(row["observed_at"]),
+                    "attempts": int(row["attempts"]),
+                    "last_error": str(row["last_error"] or "未知错误"),
+                }
+                for row in store.failed()
+            ]
+        finally:
+            store.close()
+        return {"items": items, "count": len(items)}
+
+    def retry_failed_messages(self, message_keys: object) -> dict[str, Any]:
+        self._require_forwarder_stopped("重试失败消息")
+        if message_keys is not None and (
+            not isinstance(message_keys, list) or not all(isinstance(key, str) for key in message_keys)
+        ):
+            raise ValueError("message_keys 必须是字符串数组或 null")
+        config = self.config()
+        store = StateStore(config.runtime.database_path)
+        try:
+            count = store.retry_failed(message_keys)
+        finally:
+            store.close()
+        return {"retried": count, "message": f"已将 {count} 条失败消息放回待发送队列"}
+
+    @staticmethod
+    def _history_item_id(record: HistoryRecord, index: int) -> str:
+        material = "\0".join((
+            record.source_group,
+            record.sender or "",
+            record.display_time,
+            record.kind,
+            record.content,
+            str(record.occurrence),
+            str(index),
+        ))
+        return hashlib.sha256(f"manual-history-preview\0{material}".encode("utf-8")).hexdigest()
+
+    def preview_history(self, listener_name: object) -> dict[str, Any]:
+        self._require_forwarder_stopped("读取 QQ 历史消息")
+        if not isinstance(listener_name, str) or not listener_name.strip():
+            raise ValueError("请选择要补发的 QQ 群或联系人")
+        config = self.config()
+        selected = next(
+            (name for name in config.source.listener_names if name.casefold() == listener_name.strip().casefold()),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"未配置监听会话：{listener_name.strip()}")
+        records = QqHistoryReader(config.source).read_visible(selected, settle_seconds=0.6)
+        if records is None:
+            raise RuntimeError("未能读取 QQ 聊天窗口，请确认 QQ 已登录且该会话可以打开")
+        preview: dict[str, HistoryRecord] = {}
+        items: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            item_id = self._history_item_id(record, index)
+            preview[item_id] = record
+            items.append({
+                "message_id": item_id,
+                "source_group": record.source_group,
+                "sender": record.sender,
+                "content": record.content,
+                "display_time": record.display_time,
+                "kind": record.kind,
+            })
+        self.history_previews[selected] = preview
+        return {"listener_name": selected, "items": items, "count": len(items)}
+
+    def replay_history(self, listener_name: object, message_ids: object) -> dict[str, Any]:
+        self._require_forwarder_stopped("补发 QQ 历史消息")
+        if not isinstance(listener_name, str) or not listener_name.strip():
+            raise ValueError("请选择要补发的 QQ 群或联系人")
+        if not isinstance(message_ids, list) or not message_ids or not all(isinstance(item, str) for item in message_ids):
+            raise ValueError("请至少选择一条历史消息")
+        config = self.config()
+        selected = next(
+            (name for name in config.source.listener_names if name.casefold() == listener_name.strip().casefold()),
+            None,
+        )
+        preview = self.history_previews.get(selected or "")
+        if selected is None or preview is None:
+            raise RuntimeError("历史消息预览已失效，请重新点击查看历史消息")
+        unknown = [item_id for item_id in message_ids if item_id not in preview]
+        if unknown:
+            raise RuntimeError("历史消息预览已变化，请重新读取后再补发")
+        store = StateStore(config.runtime.database_path)
+        queued = 0
+        skipped = 0
+        try:
+            for item_id in dict.fromkeys(message_ids):
+                record = preview[item_id]
+                message = IncomingMessage.create(
+                    f"manual-history:{item_id}",
+                    record.source_group,
+                    record.content,
+                    sender=record.sender,
+                    kind=record.kind,
+                )
+                if store.enqueue(message):
+                    queued += 1
+                else:
+                    skipped += 1
+        finally:
+            store.close()
+        return {
+            "queued": queued,
+            "skipped": skipped,
+            "message": f"已加入待发送 {queued} 条，跳过重复 {skipped} 条；启动转发服务后发送",
+        }
+
+
+def _looks_like_unconfigured(value: str) -> bool:
+    normalized = value.strip().casefold()
+    return not normalized or "替换" in normalized or "group_openid" in normalized
+
 
 class ControlHandler(BaseHTTPRequestHandler):
     controller: ForwarderController
@@ -309,6 +474,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._error(exc)
             return
+        if path == "/api/replay/failed":
+            try:
+                self._json({"ok": True, **self.controller.failed_messages()})
+            except Exception as exc:
+                self._error(exc)
+            return
         if path in {"/", "/index.html"}:
             self._serve_file("index.html", "text/html; charset=utf-8")
             return
@@ -348,6 +519,19 @@ class ControlHandler(BaseHTTPRequestHandler):
                 result = self.controller.inspect_window()
             elif path == "/api/actions/inspect-image-cache":
                 result = self.controller.inspect_image_cache()
+            elif path == "/api/actions/preflight":
+                result = self.controller.preflight()
+            elif path == "/api/actions/test-message":
+                result = self.controller.send_test_message()
+            elif path == "/api/actions/retry-failed":
+                result = self.controller.retry_failed_messages(body.get("message_keys"))
+            elif path == "/api/actions/history-preview":
+                result = self.controller.preview_history(body.get("listener_name"))
+            elif path == "/api/actions/replay-history":
+                result = self.controller.replay_history(
+                    body.get("listener_name"),
+                    body.get("message_ids"),
+                )
             elif path in {"/api/actions/listener-names", "/api/actions/listener-groups"}:
                 action = body.get("action")
                 if action == "add":
