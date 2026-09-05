@@ -1,0 +1,1 @@
+"""Windows QQ group forwarder."""

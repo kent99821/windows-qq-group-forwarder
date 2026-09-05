@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Windows QQ 转发器</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">LOCAL CONTROL PLANE</p>
+      <h1>Windows QQ 群转发器</h1>
+      <p class="lede">监听 Windows 通知栏中的 QQ A 群通知，并将文本及可取得的图片转发到 B 群官方机器人。</p>
+    </header>
+
+    <section class="panel status-panel">
+      <div class="panel-heading"><div><p class="eyebrow">SERVICE</p><h2>运行状态</h2></div><span id="status-badge" class="badge">读取中</span></div>
+      <div class="stats">
+        <div><span>进程</span><strong id="process-value">—</strong></div>
+        <div><span>待发送</span><strong id="pending-value">—</strong></div>
+        <div><span>已发送</span><strong id="sent-value">—</strong></div>
+        <div><span>已废弃</span><strong id="discarded-value">—</strong></div>
+      </div>
+      <p id="status-detail" class="muted">正在读取状态…</p>
+      <div class="actions">
+        <button id="start-button" class="primary">启动转发</button>
+        <button id="stop-button">停止</button>
+        <button id="restart-button">重启</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <p class="eyebrow">MODE</p><h2>运行模式</h2>
+        <label class="switch-row"><input id="dry-run" type="checkbox" checked><span>Dry-run</span></label>
+        <p class="muted">开启时只监听通知并入队，不会向 B 群真实发送消息。</p>
+      </div>
+      <div class="panel">
+        <p class="eyebrow">DIAGNOSTICS</p><h2>QQ 通知诊断</h2>
+        <p class="muted">发送一条 A 群消息后检查 Windows 通知弹窗是否能被读取。</p>
+        <button id="inspect-button">检查通知弹窗</button>
+        <button id="inspect-image-cache-button">检查图片缓存</button>
+      </div>
+      <div class="panel">
+        <p class="eyebrow">DESTINATION</p><h2>绑定 B 群</h2>
+        <p class="muted">停止转发后点击绑定，然后在 B 群 @机器人发送“绑定”。</p>
+        <button id="bind-button">绑定 B 群</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><p class="eyebrow">LOG</p><h2>最近日志</h2></div><button id="refresh-log">刷新</button></div>
+      <pre id="log-output">暂无日志</pre>
+    </section>
+    <p id="toast" class="toast" role="status"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
