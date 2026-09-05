@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from typing import Any
 
@@ -7,6 +8,25 @@ import httpx
 
 from ..config import DestinationConfig
 from ..models import IncomingMessage
+
+
+def format_forward_content(prefix: str, message: IncomingMessage) -> str:
+    """Format text forwarded to B group, including the local observed time."""
+    timestamp = _format_local_time(message.observed_at)
+    sender = f"{message.sender}: " if message.sender else ""
+    suffix = "（Windows 通知仅提供图片占位符，无法取得原图）" if message.kind == "toast_image_notice" else ""
+    return f"{prefix} [{timestamp}] {sender}{message.content}{suffix}".strip()
+
+
+def _format_local_time(value: str) -> str:
+    """Convert the stored UTC timestamp to the computer's local display time."""
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class OfficialQqBotSender:
@@ -36,12 +56,10 @@ class OfficialQqBotSender:
     async def send(self, message: IncomingMessage) -> None:
         if self.api is None:
             raise RuntimeError("QQ 机器人发送器尚未启动")
-        sender = f"{message.sender}: " if message.sender else ""
-        suffix = "（Windows 通知仅提供图片占位符，无法取得原图）" if message.kind == "toast_image_notice" else ""
-        content = f"{self.config.message_prefix} {sender}{message.content}{suffix}".strip()
         if message.kind == "image" and message.media_path:
             await self._send_image(message)
             return
+        content = format_forward_content(self.config.message_prefix, message)
         try:
             response = await self.api.send_text(
                 "group", self.config.group_openid, content,
