@@ -12,6 +12,7 @@ from .destination.qq_bot import OfficialQqBotSender
 from .models import IncomingMessage
 from .single_instance import SingleInstanceError, SingleInstanceLock
 from .source.windows_notification import WindowsNotificationReader
+from .source.qq_history_reader import QqHistoryReader
 from .source.qq_image_cache import QqImageCache
 from .source.qq_window_image import QqWindowImageReader
 from .state_store import StateStore
@@ -118,14 +119,19 @@ async def route_notification_batches(
     image_queue: asyncio.Queue[list[IncomingMessage]],
     store: StateStore,
     send_signal: asyncio.Event,
+    history_reader: QqHistoryReader | None = None,
 ) -> None:
-    """文本立即入库，图片交给独立处理任务，避免图片阻塞文本监听。"""
+    """补读聊天记录后路由；通知采集任务仍独立高速运行。"""
     while True:
         messages = await input_queue.get()
         try:
+            if history_reader is not None:
+                messages = await asyncio.to_thread(history_reader.reconcile, messages)
             image_messages = [message for message in messages if message.kind == "toast_image_notice"]
             text_messages = [message for message in messages if message.kind != "toast_image_notice"]
-            enqueued = any(enqueue_message(store, message) for message in text_messages)
+            enqueued = False
+            for message in text_messages:
+                enqueued = enqueue_message(store, message) or enqueued
             if enqueued:
                 send_signal.set()
             if image_messages:
@@ -230,6 +236,7 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
         if discarded:
             logging.getLogger(__name__).warning("已废弃 %d 条旧窗口扫描待发送记录，不会发送到 B 群", discarded)
         reader = WindowsNotificationReader(config.source)
+        history_reader = QqHistoryReader(config.source)
         image_cache = QqImageCache(config.source)
         window_image_reader = QqWindowImageReader(config.source)
         sender: OfficialQqBotSender | None = None
@@ -246,6 +253,7 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
             if not config.runtime.dry_run:
                 sender = OfficialQqBotSender(config.destination)
                 await sender.start()
+            await asyncio.to_thread(history_reader.prime)
             logger.info(
                 "Windows QQ 转发器已启动 source_names=%s notification_backend=%s dry_run=%s",
                 ",".join(config.source.listener_names),
@@ -259,7 +267,13 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                     name="qq-notification-collector",
                 ),
                 asyncio.create_task(
-                    route_notification_batches(notification_queue, image_queue, store, send_signal),
+                    route_notification_batches(
+                        notification_queue,
+                        image_queue,
+                        store,
+                        send_signal,
+                        history_reader,
+                    ),
                     name="qq-notification-router",
                 ),
                 asyncio.create_task(

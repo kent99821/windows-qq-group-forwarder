@@ -1,11 +1,13 @@
 import asyncio
 from collections import deque
+from pathlib import Path
 import threading
 
 from app.config import SourceConfig
-from app.main import collect_notifications
+from app.main import collect_notifications, route_notification_batches
 from app.models import IncomingMessage
 from app.source.windows_notification import _UserNotificationListenerBackend
+from app.state_store import StateStore
 
 
 class FakeReader:
@@ -50,3 +52,31 @@ def test_winrt_scan_drains_event_candidates_before_snapshot() -> None:
 
     assert backend.scan() == [candidate_one, candidate_two]
     assert not backend._event_candidates
+
+
+def test_router_enqueues_every_text_message_in_one_backfill_batch(tmp_path: Path) -> None:
+    async def scenario() -> list[str]:
+        store = StateStore(tmp_path / "state.sqlite3")
+        input_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        image_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        send_signal = asyncio.Event()
+        messages = [
+            IncomingMessage.create(f"message-{index}", "发家致富", str(index), kind="history_text")
+            for index in range(1, 7)
+        ]
+        task = asyncio.create_task(route_notification_batches(
+            input_queue,
+            image_queue,
+            store,
+            send_signal,
+        ))
+        try:
+            await input_queue.put(messages)
+            await asyncio.wait_for(input_queue.join(), timeout=1)
+            return [str(row["content"]) for row in store.pending(limit=20)]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            store.close()
+
+    assert asyncio.run(scenario()) == ["1", "2", "3", "4", "5", "6"]
