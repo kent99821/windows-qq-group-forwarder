@@ -57,6 +57,11 @@ class StateStore:
             "SELECT * FROM messages WHERE status = 'pending' ORDER BY rowid LIMIT ?", (limit,)
         ))
 
+    def failed(self, limit: int = 100) -> list[sqlite3.Row]:
+        return list(self.connection.execute(
+            "SELECT * FROM messages WHERE status = 'failed' ORDER BY rowid DESC LIMIT ?", (limit,)
+        ))
+
     def mark_attempt(self, message_key: str, error: str | None = None) -> None:
         self.connection.execute(
             "UPDATE messages SET attempts = attempts + 1, last_error = ? WHERE message_key = ?",
@@ -70,6 +75,31 @@ class StateStore:
             (message_key,),
         )
         self.connection.commit()
+
+    def mark_failed(self, message_key: str, error: str) -> None:
+        self.connection.execute(
+            "UPDATE messages SET status = 'failed', last_error = ? WHERE message_key = ?",
+            (error[:1000], message_key),
+        )
+        self.connection.commit()
+
+    def retry_failed(self, message_keys: list[str] | tuple[str, ...] | None = None) -> int:
+        if message_keys is None:
+            cursor = self.connection.execute(
+                "UPDATE messages SET status = 'pending', attempts = 0, last_error = NULL WHERE status = 'failed'"
+            )
+        else:
+            normalized = tuple(dict.fromkeys(str(key) for key in message_keys if str(key)))
+            if not normalized:
+                return 0
+            placeholders = ",".join("?" for _ in normalized)
+            cursor = self.connection.execute(
+                f"UPDATE messages SET status = 'pending', attempts = 0, last_error = NULL "
+                f"WHERE status = 'failed' AND message_key IN ({placeholders})",
+                normalized,
+            )
+        self.connection.commit()
+        return cursor.rowcount
 
     def discard_legacy_pending(self) -> int:
         """废弃旧 UIA 窗口扫描产生的 text 队列，不影响新的 toast_text 通知。"""
@@ -91,7 +121,7 @@ class StateStore:
         rows = self.connection.execute(
             "SELECT status, COUNT(*) AS count FROM messages GROUP BY status"
         ).fetchall()
-        summary = {"pending": 0, "sent": 0}
+        summary = {"pending": 0, "sent": 0, "failed": 0, "discarded": 0}
         for row in rows:
             summary[str(row["status"])] = int(row["count"])
         return summary

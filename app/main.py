@@ -42,7 +42,14 @@ async def process_pending(config: AppConfig, store: StateStore, sender: Official
             row["kind"],
             row["content"],
         )
-        for attempt in range(1, config.runtime.max_send_attempts + 1):
+        attempts_before = int(row["attempts"])
+        remaining_attempts = config.runtime.max_send_attempts - attempts_before
+        if remaining_attempts <= 0:
+            store.mark_failed(key, str(row["last_error"] or "已达到最大重试次数"))
+            logger.error("消息已进入失败队列 key=%s attempts=%d", key[:12], attempts_before)
+            continue
+        for offset in range(remaining_attempts):
+            attempt = attempts_before + offset + 1
             try:
                 await sender.send(IncomingMessage(
                     message_key=key,
@@ -67,11 +74,14 @@ async def process_pending(config: AppConfig, store: StateStore, sender: Official
                 logger.info("消息已发送 key=%s attempt=%d", key[:12], attempt)
                 break
             except Exception as exc:
-                store.mark_attempt(key, type(exc).__name__)
+                error = f"{type(exc).__name__}: {exc}"
+                store.mark_attempt(key, error)
                 logger.warning("发送失败 key=%s attempt=%d/%d error=%s", key[:12], attempt, config.runtime.max_send_attempts, type(exc).__name__)
                 if attempt >= config.runtime.max_send_attempts:
+                    store.mark_failed(key, error)
+                    logger.error("消息已进入失败队列 key=%s attempts=%d", key[:12], attempt)
                     break
-                await asyncio.sleep(min(2 ** (attempt - 1), 10))
+                await asyncio.sleep(min(2 ** offset, 10))
 
 
 async def collect_notifications(
