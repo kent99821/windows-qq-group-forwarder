@@ -54,6 +54,38 @@ def test_controller_detects_forwarder_started_elsewhere(tmp_path: Path) -> None:
     finally:
         lock.release()
 
+    assert controller.add_listener_group("二群")["listener_groups"] == ["A 群", "二群"]
+    assert controller.remove_listener_group("二群")["listener_groups"] == ["A 群"]
+    with pytest.raises(ValueError, match="至少需要保留一个监听会话"):
+        controller.remove_listener_group("A 群")
+
+
+def test_controller_reports_missing_secret_before_starting_real_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[source]\n'''
+        f'''group_name = "联系人"\n'''
+        f'''app_name_contains = "QQ"\n'''
+        f'''poll_interval_seconds = 1.0\n'''
+        f'''exclude_texts = []\n\n'''
+        f'''[destination]\n'''
+        f'''app_id = "app"\n'''
+        f'''client_secret_env = "TEST_QQ_SECRET"\n'''
+        f'''group_openid = "group"\n'''
+        f'''message_prefix = "[转发]"\n\n'''
+        f'''[runtime]\n'''
+        f'''database_path = "{data_dir.as_posix()}/state.sqlite3"\n'''
+        f'''log_path = "{data_dir.as_posix()}/forwarder.log"\n'''
+        f'''dry_run = false\n'''
+        f'''max_send_attempts = 1\n''',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TEST_QQ_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError, match="Web 控制面进程未读取环境变量 TEST_QQ_SECRET"):
+        ForwarderController(config_path).start()
+
 
 class FakeController:
     def __init__(self) -> None:

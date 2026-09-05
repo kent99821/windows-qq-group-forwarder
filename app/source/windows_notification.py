@@ -13,6 +13,7 @@ from ..models import IncomingMessage
 LOGGER = logging.getLogger(__name__)
 RECENT_MESSAGE_SECONDS = 15.0
 ACTION_TEXTS = {"关闭", "设置", "回复", "查看", "更多选项"}
+Candidate = tuple[str, str, str, str, str]
 
 
 def normalize_text(value: str) -> str:
@@ -71,7 +72,7 @@ class _UserNotificationListenerBackend:
         except Exception:
             return ""
 
-    def scan(self) -> list[tuple[str, str, str, str]]:
+    def scan(self) -> list[Candidate]:
         try:
             notifications = self._listener.get_notifications_async(
                 self._notification_kinds.TOAST
@@ -79,7 +80,7 @@ class _UserNotificationListenerBackend:
         except Exception as exc:
             raise RuntimeError(f"读取 Windows 通知 API 失败：{type(exc).__name__}") from exc
 
-        results: list[tuple[str, str, str, str]] = []
+        results: list[Candidate] = []
         for notification in notifications:
             app = self._app_name(notification)
             texts = self._notification_texts(notification)
@@ -186,7 +187,7 @@ class WindowsNotificationReader:
         title: str,
         texts: list[str],
         class_name: str,
-    ) -> list[tuple[str, str, str, str]]:
+    ) -> list[Candidate]:
         if not texts:
             return []
         searchable = " ".join([title, class_name, *texts]).casefold()
@@ -196,42 +197,43 @@ class WindowsNotificationReader:
         core_window = class_name.casefold() == "windows.ui.core.corewindow"
         if not app_match and not core_window:
             return []
-        group_name = normalize_text(config.group_name).casefold()
+        configured_names = {
+            normalize_text(name).casefold(): normalize_text(name)
+            for name in config.listener_names
+            if normalize_text(name)
+        }
         group_indexes = [
-            index for index, text in enumerate(texts)
-            if normalize_text(text).casefold() == group_name
+            (index, configured_names[normalize_text(text).casefold()])
+            for index, text in enumerate(texts)
+            if normalize_text(text).casefold() in configured_names
         ]
         if not group_indexes:
             return []
         excluded = {item.casefold() for item in config.exclude_texts}
-        bodies: list[str] = []
-        for group_index in group_indexes:
-            # Windows 可能把多个 QQ toast 聚合到同一个顶层窗口。群名后面
-            # 连续的多段“发送者：正文”都属于该群；遇到下一个无冒号的群名
-            # 或控件文本时停止，避免把其他群的消息混入。
+        bodies: list[tuple[str, str]] = []
+        for group_index, group_name in group_indexes:
+            # Windows 可能把多个 QQ toast 聚合到同一个顶层窗口。会话名称后面
+            # 连续的多段消息都属于该会话；遇到下一个已配置的会话名称时停止，
+            # 避免把其他会话的消息混入。
             for text in texts[group_index + 1:]:
                 value = normalize_text(text)
                 folded = value.casefold()
-                if not value or folded == group_name:
+                if not value:
                     continue
+                if folded in configured_names:
+                    break
                 if config.app_name_contains.casefold() in folded:
                     continue
                 if folded in excluded or value in ACTION_TEXTS:
                     continue
-                # QQ 群通知正文包含“发送者：正文”。如果下一段没有冒号，
-                # 它更可能是聚合窗口中另一条通知的群名，必须拒绝。
-                if "：" not in value and ":" not in value:
-                    break
-                bodies.append(value)
-            if bodies:
-                break
+                bodies.append((group_name, value))
         app = title or config.app_name_contains
         return [
-            (f"{identity}:item:{index}", app, body, class_name)
-            for index, body in enumerate(bodies)
+            (f"{identity}:item:{index}", app, group_name, body, class_name)
+            for index, (group_name, body) in enumerate(bodies)
         ]
 
-    def _candidate_items(self, window: Any) -> list[tuple[str, str, str, str]]:
+    def _candidate_items(self, window: Any) -> list[Candidate]:
         if not self._small_window(window):
             return []
         texts = self._texts(window)
@@ -247,12 +249,12 @@ class WindowsNotificationReader:
             class_name,
         )
 
-    def _candidate(self, window: Any) -> tuple[str, str, str, str] | None:
+    def _candidate(self, window: Any) -> Candidate | None:
         items = self._candidate_items(window)
         return items[0] if items else None
 
-    def _scan_uia(self) -> list[tuple[str, str, str, str]]:
-        results: list[tuple[str, str, str, str]] = []
+    def _scan_uia(self) -> list[Candidate]:
+        results: list[Candidate] = []
         for window in self._windows():
             try:
                 candidates = self._candidate_items(window)
@@ -263,10 +265,19 @@ class WindowsNotificationReader:
                     results.append(candidate)
         return results
 
-    def _scan(self) -> list[tuple[str, str, str, str]]:
+    def _scan(self) -> list[Candidate]:
         if self._api_backend is not None:
             try:
-                return self._api_backend.scan()
+                api_results = self._api_backend.scan()
+                if api_results:
+                    return api_results
+                # 某些 QQ 桌面版本会显示 Windows Toast，但不会把该 Toast
+                # 暴露给 UserNotificationListener；此时必须读取可见通知窗口。
+                uia_results = self._scan_uia()
+                if uia_results:
+                    self._backend_name = "windows-user-notification-listener+uia-fallback"
+                    return uia_results
+                return []
             except RuntimeError as exc:
                 LOGGER.warning("Windows 通知 API 读取失败，将回退 UI Automation：%s", exc)
                 self._api_backend = None
@@ -274,12 +285,18 @@ class WindowsNotificationReader:
         return self._scan_uia()
 
     def _fingerprint(self, identity: str, app: str, body: str) -> str:
-        return hashlib.sha256(f"{identity}\0{app}\0{self.config.group_name}\0{body}".encode("utf-8")).hexdigest()
+        return hashlib.sha256(f"{identity}\0{app}\0{self.config.listener_names}\0{body}".encode("utf-8")).hexdigest()
 
-    def _content_fingerprint(self, app: str, body: str) -> str:
-        return hashlib.sha256(f"{app}\0{self.config.group_name}\0{body}".encode("utf-8")).hexdigest()
+    def _content_fingerprint(self, app: str, group_name: str, body: str) -> str:
+        return hashlib.sha256(f"{app}\0{group_name}\0{body}".encode("utf-8")).hexdigest()
 
-    def _message(self, identity: str, app: str, body: str | None = None) -> IncomingMessage:
+    def _message(
+        self,
+        identity: str,
+        app: str,
+        body: str | None = None,
+        source_group: str | None = None,
+    ) -> IncomingMessage:
         # 保留旧的两参数诊断调用兼容性；实时监听始终传入三个参数。
         if body is None:
             body = app
@@ -290,7 +307,17 @@ class WindowsNotificationReader:
         fingerprint = self._fingerprint(identity, app, body)
         key = hashlib.sha256(f"{fingerprint}\0{uuid4().hex}".encode("ascii")).hexdigest()
         kind = "toast_image_notice" if "[图片]" in body else "toast_text"
-        return IncomingMessage.create(key, self.config.group_name, body, kind=kind)
+        # 联系人通知通常只有“联系人昵称 + 正文”，没有“发送者：正文”前缀。
+        # 这时来源会话名称就是应显示在转发消息中的联系人昵称；群通知
+        # 若带有发送者前缀则保留原始正文，避免重复添加群名。
+        sender = source_group if source_group and ":" not in body and "：" not in body else None
+        return IncomingMessage.create(
+            key,
+            source_group or self.config.group_name,
+            body,
+            sender=sender,
+            kind=kind,
+        )
 
     def prime(self) -> None:
         try:
@@ -298,15 +325,15 @@ class WindowsNotificationReader:
             scanned = self._scan()
             self._active = {
                 self._fingerprint(identity, app, body)
-                for identity, app, body, _class_name in scanned
+                for identity, app, _group_name, body, _class_name in scanned
             }
             self._recent_content = {
-                self._content_fingerprint(app, body): now + RECENT_MESSAGE_SECONDS
-                for _identity, app, body, _class_name in scanned
+                self._content_fingerprint(app, group_name, body): now + RECENT_MESSAGE_SECONDS
+                for _identity, app, group_name, body, _class_name in scanned
             }
             self._last_content_counts = Counter(
-                self._content_fingerprint(app, body)
-                for _identity, app, body, _class_name in scanned
+                self._content_fingerprint(app, group_name, body)
+                for _identity, app, group_name, body, _class_name in scanned
             )
             self._primed = True
         except RuntimeError as exc:
@@ -321,8 +348,8 @@ class WindowsNotificationReader:
         }
         scanned = self._scan()
         current_content_counts = Counter(
-            self._content_fingerprint(app, body)
-            for _identity, app, body, _class_name in scanned
+            self._content_fingerprint(app, group_name, body)
+            for _identity, app, group_name, body, _class_name in scanned
         )
         # 如果上一次扫描中已经没有某种正文，下一次出现相同正文应视为新消息。
         for key in list(self._recent_content):
@@ -337,12 +364,12 @@ class WindowsNotificationReader:
         emitted_content_keys: set[str] = set()
         current = {
             self._fingerprint(identity, app, body)
-            for identity, app, body, _class_name in scanned
+            for identity, app, _group_name, body, _class_name in scanned
         }
         found: list[IncomingMessage] = []
-        for identity, app, body, _class_name in scanned:
+        for identity, app, group_name, body, _class_name in scanned:
             fingerprint = self._fingerprint(identity, app, body)
-            content_fingerprint = self._content_fingerprint(app, body)
+            content_fingerprint = self._content_fingerprint(app, group_name, body)
             if fingerprint in self._active:
                 continue
             if content_fingerprint in recent_before:
@@ -350,7 +377,7 @@ class WindowsNotificationReader:
                 # 允许新增的那几条相同正文进入队列。
                 if emitted_by_content[content_fingerprint] >= content_increase.get(content_fingerprint, 0):
                     continue
-            found.append(self._message(identity, app, body))
+            found.append(self._message(identity, app, body, source_group=group_name))
             emitted_by_content[content_fingerprint] += 1
             emitted_content_keys.add(content_fingerprint)
         for content_fingerprint in emitted_content_keys:
@@ -370,10 +397,10 @@ class WindowsNotificationReader:
                     "window_title": app,
                     "class_name": class_name,
                     "identity": identity,
-                    "texts": [self.config.group_name, body],
+                    "texts": [group_name, body],
                     "body": body,
                 }
-                for identity, app, body, class_name in scanned
+                for identity, app, group_name, body, class_name in scanned
             ]
             return {"backend": self._backend_name, "notifications": notifications}
 
@@ -387,12 +414,13 @@ class WindowsNotificationReader:
             candidate = self._candidate(window)
             if candidate is None:
                 continue
-            identity, title, body, class_name = candidate
+            identity, title, group_name, body, class_name = candidate
             notifications.append({
                 "window_title": title,
                 "class_name": class_name,
                 "identity": identity,
                 "texts": texts,
+                "group_name": group_name,
                 "body": body,
             })
         return {"backend": self._backend_name, "notifications": notifications}

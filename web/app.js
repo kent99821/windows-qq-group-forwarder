@@ -25,17 +25,81 @@ async function refreshStatus() {
     $("pending-value").textContent = status.messages?.pending ?? 0;
     $("sent-value").textContent = status.messages?.sent ?? 0;
     $("discarded-value").textContent = status.messages?.discarded ?? 0;
+    const credentialWarning = !status.client_secret_configured && !$('dry-run').checked
+      ? `当前 Web 控制面未读取 ${status.client_secret_env || "机器人密钥环境变量"}，请重新启动 Web 控制面。`
+      : "";
     $("status-detail").textContent = status.config_error
+      || credentialWarning
       || (status.external_instance ? "已有其他窗口启动的转发服务，请在原窗口停止后再操作。" : (status.config_exists ? status.config_path : "未找到 config.toml"));
     $("start-button").disabled = running;
     $("stop-button").disabled = !running || status.external_instance;
     $("restart-button").disabled = !running || status.external_instance;
     $("bind-button").disabled = running;
+    renderListenerNames(status.listener_names || status.listener_groups || [], running);
   } catch (error) {
     $("status-badge").textContent = "控制面异常";
     $("status-badge").className = "badge offline";
     show(error.message);
   }
+}
+
+function renderListenerNames(names, running) {
+  const list = $("listener-names-list");
+  const count = $("listener-names-count");
+  count.textContent = `${names.length} 个`;
+  list.replaceChildren();
+  if (!names.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "暂无监听会话";
+    list.appendChild(empty);
+  } else {
+    names.forEach((nameValue) => {
+      const row = document.createElement("div");
+      row.className = "listener-group-row";
+      const name = document.createElement("span");
+      name.textContent = nameValue;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "danger-button";
+      remove.textContent = "删除";
+      remove.disabled = running || names.length <= 1;
+      remove.addEventListener("click", () => removeListenerName(nameValue));
+      row.append(name, remove);
+      list.appendChild(row);
+    });
+  }
+  $("add-listener-name").disabled = running;
+  $("listener-name").disabled = running;
+}
+
+async function addListenerName() {
+  const input = $("listener-name");
+  const listenerName = input.value.trim();
+  if (!listenerName) { show("请输入 QQ 群名或联系人昵称"); return; }
+  try {
+    const body = await request("/api/actions/listener-names", {
+      method: "POST",
+      body: JSON.stringify({ action: "add", listener_name: listenerName }),
+    });
+    input.value = "";
+    show(`已添加监听会话：${listenerName}`);
+    renderListenerNames(body.listener_names || body.listener_groups || [], false);
+    await refreshStatus();
+  } catch (error) { show(error.message); }
+}
+
+async function removeListenerName(listenerName) {
+  if (!window.confirm(`确定删除监听会话“${listenerName}”吗？`)) return;
+  try {
+    const body = await request("/api/actions/listener-names", {
+      method: "POST",
+      body: JSON.stringify({ action: "remove", listener_name: listenerName }),
+    });
+    show(`已删除监听会话：${listenerName}`);
+    renderListenerNames(body.listener_names || body.listener_groups || [], false);
+    await refreshStatus();
+  } catch (error) { show(error.message); }
 }
 
 async function action(path) {
@@ -73,6 +137,10 @@ $("inspect-image-cache-button").addEventListener("click", async () => {
     const images = body.recent_images?.length || 0;
     show(`找到 ${roots} 个 QQ 图片缓存目录，最近图片 ${images} 个`);
   } catch (error) { show(error.message); }
+});
+$("add-listener-name").addEventListener("click", addListenerName);
+$("listener-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") addListenerName();
 });
 $("bind-button").addEventListener("click", async () => {
   if (!window.confirm("请先停止转发，并准备在 B 群 @机器人发送“绑定”。继续吗？")) return;

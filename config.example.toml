@@ -1,6 +1,9 @@
 [source]
-# Windows QQ 通知弹窗顶部显示的目标群名，使用精确匹配。
+# 推荐配置：需要监听的 QQ 群名或联系人昵称，使用精确匹配；可在 Web UI 中增删。
+listener_names = ["A群名称", "联系人昵称"]
+# 兼容旧配置：第一个监听会话名称。Web UI 会同步更新下面两个旧字段。
 group_name = "A群名称"
+group_names = ["A群名称", "联系人昵称"]
 app_name_contains = "QQ"
 poll_interval_seconds = 1.0
 # 这些文本不会被当作聊天消息。可以按 inspect-window 输出继续增加。

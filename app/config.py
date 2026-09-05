@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import tomllib
@@ -17,6 +18,22 @@ class SourceConfig:
     image_cache_settle_seconds: float = 0.25
     image_cache_wait_seconds: float = 5.0
     ui_image_wait_seconds: float = 8.0
+    group_names: tuple[str, ...] = ()
+    listener_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # listener_names 是通用配置名；group_names/group_name 保留用于兼容旧配置。
+        configured_names = self.listener_names or self.group_names
+        names = tuple(dict.fromkeys(
+            name.strip() for name in configured_names if isinstance(name, str) and name.strip()
+        ))
+        if not names and self.group_name.strip():
+            names = (self.group_name.strip(),)
+        if not names:
+            raise ValueError("至少需要配置一个监听会话名称")
+        object.__setattr__(self, "listener_names", names)
+        object.__setattr__(self, "group_names", names)
+        object.__setattr__(self, "group_name", names[0])
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,18 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("poll_interval_seconds 必须是正数")
     if not isinstance(attempts, int) or attempts < 1:
         raise ValueError("max_send_attempts 必须是正整数")
+    listener_names_raw = source.get("listener_names")
+    legacy_group_names_raw = source.get("group_names")
+    names_raw = listener_names_raw if listener_names_raw is not None else legacy_group_names_raw
+    names_key = "listener_names" if listener_names_raw is not None else "group_names"
+    if names_raw is None:
+        listener_names = (_required(source, "group_name"),)
+    else:
+        if not isinstance(names_raw, list) or not all(isinstance(item, str) for item in names_raw):
+            raise ValueError(f"{names_key} 必须是字符串数组")
+        listener_names = tuple(dict.fromkeys(item.strip() for item in names_raw if item.strip()))
+        if not listener_names:
+            raise ValueError(f"{names_key} 至少需要包含一个监听会话名称")
     excludes = source.get("exclude_texts", [])
     if not isinstance(excludes, list) or not all(isinstance(item, str) for item in excludes):
         raise ValueError("exclude_texts 必须是字符串数组")
@@ -110,7 +139,7 @@ def load_config(path: Path) -> AppConfig:
 
     return AppConfig(
         source=SourceConfig(
-            group_name=_required(source, "group_name"),
+            group_name=listener_names[0],
             app_name_contains=str(source.get("app_name_contains", "QQ")).strip(),
             poll_interval_seconds=float(interval),
             exclude_texts=tuple(item.strip() for item in excludes if item.strip()),
@@ -119,6 +148,8 @@ def load_config(path: Path) -> AppConfig:
             image_cache_settle_seconds=float(image_cache_settle_seconds),
             image_cache_wait_seconds=float(image_cache_wait_seconds),
             ui_image_wait_seconds=float(ui_image_wait_seconds),
+            group_names=listener_names,
+            listener_names=listener_names,
         ),
         destination=DestinationConfig(
             app_id=_required(destination, "app_id"),
@@ -148,3 +179,54 @@ def save_group_openid(path: Path, group_openid: str) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(updated, encoding="utf-8")
     temp.replace(path)
+
+
+def save_listener_names(path: Path, listener_names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Update generic QQ conversation names while preserving the rest of config.toml."""
+    normalized = tuple(dict.fromkeys(
+        name.strip() for name in listener_names if isinstance(name, str) and name.strip()
+    ))
+    if not normalized:
+        raise ValueError("至少需要保留一个监听会话")
+    if any("\n" in name or "\r" in name or len(name) > 120 for name in normalized):
+        raise ValueError("会话名称不能为空，不能包含换行，且不能超过 120 个字符")
+
+    path = path.resolve()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    source_start = next((index for index, line in enumerate(lines) if line.strip() == "[source]"), None)
+    if source_start is None:
+        raise ValueError("config.toml 中未找到 [source] 配置段")
+    source_end = next(
+        (index for index in range(source_start + 1, len(lines)) if lines[index].strip().startswith("[") and lines[index].strip().endswith("]")),
+        len(lines),
+    )
+    serialized = json.dumps(list(normalized), ensure_ascii=False)
+    first_serialized = json.dumps(normalized[0], ensure_ascii=False)
+    newline = "\n"
+    if lines and lines[0].endswith("\r\n"):
+        newline = "\r\n"
+    source_body = lines[source_start + 1:source_end]
+
+    def set_option(option: str, value: str) -> None:
+        pattern = re.compile(rf"^\s*{re.escape(option)}\s*=")
+        for index, line in enumerate(source_body):
+            if pattern.match(line):
+                source_body[index] = f"{option} = {value}{newline}"
+                return
+        source_body.insert(0, f"{option} = {value}{newline}")
+
+    # 写入新配置名，同时更新两个旧别名，确保旧版本仍能读取。
+    set_option("listener_names", serialized)
+    set_option("group_names", serialized)
+    set_option("group_name", first_serialized)
+    lines = lines[:source_start + 1] + source_body + lines[source_end:]
+
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text("".join(lines), encoding="utf-8")
+    temp.replace(path)
+    return normalized
+
+
+def save_listener_groups(path: Path, group_names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Backward-compatible alias for callers using the old group-specific name."""
+    return save_listener_names(path, group_names)

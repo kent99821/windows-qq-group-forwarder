@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .bot_gateway import bind_group
-from .config import AppConfig, load_config, save_group_openid
+from .config import AppConfig, load_config, save_group_openid, save_listener_names
 from .source.windows_notification import WindowsNotificationReader
 from .source.qq_image_cache import QqImageCache
 from .single_instance import SingleInstanceError, SingleInstanceLock
@@ -44,7 +44,10 @@ class ForwarderController:
             self.process = None
 
     def _forwarder_lock_path(self) -> Path:
-        return self.config_path.parent / "data" / "forwarder.lock"
+        try:
+            return self.config().runtime.database_path.parent / "forwarder.lock"
+        except Exception:
+            return self.config_path.parent / "data" / "forwarder.lock"
 
     def _forwarder_lock_is_held(self) -> bool:
         """Detect a forwarder started by another control console or terminal."""
@@ -61,10 +64,16 @@ class ForwarderController:
             self._reap()
             config_exists = self.config_path.exists()
             summary = {"pending": 0, "sent": 0}
+            listener_names: list[str] = []
+            client_secret_configured = False
+            client_secret_env: str | None = None
             config_error = None
             if config_exists:
                 try:
                     config = self.config()
+                    listener_names = list(config.source.listener_names)
+                    client_secret_env = config.destination.client_secret_env
+                    client_secret_configured = bool(os.environ.get(config.destination.client_secret_env))
                     store = StateStore(config.runtime.database_path)
                     try:
                         summary = store.summary()
@@ -84,6 +93,11 @@ class ForwarderController:
                 "config_path": str(self.config_path),
                 "config_exists": config_exists,
                 "config_error": config_error,
+                "listener_names": listener_names,
+                # 保留旧字段，便于旧版页面平滑升级。
+                "listener_groups": listener_names,
+                "client_secret_configured": client_secret_configured,
+                "client_secret_env": client_secret_env,
                 "messages": summary,
             }
 
@@ -97,6 +111,11 @@ class ForwarderController:
                 raise RuntimeError("检测到已有转发服务正在运行，请先关闭原转发窗口或控制台")
             config = self.config()
             effective_dry_run = config.runtime.dry_run if dry_run is None else dry_run
+            if not effective_dry_run and not os.environ.get(config.destination.client_secret_env):
+                raise RuntimeError(
+                    f"当前 Web 控制面进程未读取环境变量 {config.destination.client_secret_env}；"
+                    "请在同一个 PowerShell 窗口重新设置密钥后重启 Web 控制面"
+                )
             command = [sys.executable, "-m", "app.main", "run", "--config", str(self.config_path)]
             if effective_dry_run:
                 command.append("--dry-run")
@@ -161,6 +180,43 @@ class ForwarderController:
     def restart(self, dry_run: bool | None = None) -> dict[str, Any]:
         self.stop()
         return self.start(dry_run=dry_run)
+
+    def _require_forwarder_stopped(self) -> None:
+        if self._alive() or self._forwarder_lock_is_held():
+            raise RuntimeError("请先停止转发服务，再修改监听群列表")
+
+    def add_listener_name(self, listener_name: object) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped()
+            if not isinstance(listener_name, str) or not listener_name.strip():
+                raise ValueError("监听会话名称不能为空")
+            config = self.config()
+            candidate = listener_name.strip()
+            if any(candidate.casefold() == current.casefold() for current in config.source.listener_names):
+                raise ValueError(f"监听会话已存在：{candidate}")
+            names = save_listener_names(self.config_path, [*config.source.listener_names, candidate])
+            return {"listener_names": list(names), "listener_groups": list(names)}
+
+    def remove_listener_name(self, listener_name: object) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped()
+            if not isinstance(listener_name, str) or not listener_name.strip():
+                raise ValueError("监听会话名称不能为空")
+            config = self.config()
+            candidate = listener_name.strip()
+            names = [current for current in config.source.listener_names if current.casefold() != candidate.casefold()]
+            if len(names) == len(config.source.listener_names):
+                raise ValueError(f"未找到监听会话：{candidate}")
+            saved = save_listener_names(self.config_path, names)
+            return {"listener_names": list(saved), "listener_groups": list(saved)}
+
+    def add_listener_group(self, group_name: object) -> dict[str, Any]:
+        """Backward-compatible alias for the old group-specific API."""
+        return self.add_listener_name(group_name)
+
+    def remove_listener_group(self, group_name: object) -> dict[str, Any]:
+        """Backward-compatible alias for the old group-specific API."""
+        return self.remove_listener_name(group_name)
 
     def bind_destination_group(self) -> dict[str, Any]:
         with self.lock:
@@ -263,6 +319,14 @@ class ControlHandler(BaseHTTPRequestHandler):
                 result = self.controller.inspect_window()
             elif path == "/api/actions/inspect-image-cache":
                 result = self.controller.inspect_image_cache()
+            elif path in {"/api/actions/listener-names", "/api/actions/listener-groups"}:
+                action = body.get("action")
+                if action == "add":
+                    result = self.controller.add_listener_name(body.get("listener_name", body.get("group_name")))
+                elif action == "remove":
+                    result = self.controller.remove_listener_name(body.get("listener_name", body.get("group_name")))
+                else:
+                    raise ValueError("action 必须是 add 或 remove")
             elif path == "/api/actions/bind-group":
                 result = self.controller.bind_destination_group()
             else:

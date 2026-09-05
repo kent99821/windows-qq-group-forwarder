@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Windows QQ 转发器</title>
+  <title>Windows QQ 消息转发器</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main class="shell">
     <header>
       <p class="eyebrow">LOCAL CONTROL PLANE</p>
-      <h1>Windows QQ 群转发器</h1>
-      <p class="lede">监听 Windows 通知栏中的 QQ A 群通知，并将文本及可取得的图片转发到 B 群官方机器人。</p>
+      <h1>Windows QQ 消息转发器</h1>
+      <p class="lede">监听 Windows 通知栏中的 QQ 群或联系人消息，并将文本及可取得的图片转发到 B 群官方机器人。</p>
     </header>
 
     <section class="panel status-panel">
@@ -46,6 +46,21 @@
         <p class="eyebrow">DESTINATION</p><h2>绑定 B 群</h2>
         <p class="muted">停止转发后点击绑定，然后在 B 群 @机器人发送“绑定”。</p>
         <button id="bind-button">绑定 B 群</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div><p class="eyebrow">SOURCES</p><h2>监听 QQ 会话</h2></div>
+        <span id="listener-names-count" class="panel-meta">—</span>
+      </div>
+      <p class="muted">添加需要监听的 QQ 群名或联系人昵称。名称必须与 Windows QQ 通知中的会话名称完全一致；修改前请先停止转发服务。</p>
+      <div id="listener-names-list" class="listener-groups-list">
+        <p class="muted">正在读取监听会话…</p>
+      </div>
+      <div class="listener-group-add">
+        <input id="listener-name" type="text" maxlength="120" placeholder="输入群名或联系人昵称">
+        <button id="add-listener-name" class="primary">添加监听会话</button>
       </div>
     </section>
 

@@ -98,8 +98,8 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                 sender = OfficialQqBotSender(config.destination)
                 await sender.start()
             logger.info(
-                "Windows QQ 转发器已启动 source_group=%s notification_backend=%s dry_run=%s",
-                config.source.group_name,
+                "Windows QQ 转发器已启动 source_names=%s notification_backend=%s dry_run=%s",
+                ",".join(config.source.listener_names),
                 reader.backend_name,
                 config.runtime.dry_run,
             )
@@ -108,13 +108,20 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                     messages = reader.poll()
                     image_messages = [message for message in messages if message.kind == "toast_image_notice"]
                     staging_dir = config.runtime.database_path.parent / "image-cache"
-                    captured_images = window_image_reader.capture_many(
-                        [message.message_key for message in image_messages], staging_dir
-                    )
-                    captured_by_key = {
-                        message.message_key: path
-                        for message, path in zip(image_messages, captured_images)
-                    }
+                    captured_by_key: dict[str, Path | None] = {}
+                    grouped_images: dict[str, list[IncomingMessage]] = {}
+                    for message in image_messages:
+                        grouped_images.setdefault(message.source_group, []).append(message)
+                    for source_group, group_messages in grouped_images.items():
+                        captured_images = window_image_reader.capture_many(
+                            [message.message_key for message in group_messages],
+                            staging_dir,
+                            source_group,
+                        )
+                        captured_by_key.update({
+                            message.message_key: path
+                            for message, path in zip(group_messages, captured_images)
+                        })
                     for message in messages:
                         if message.kind == "toast_image_notice":
                             staged_image = captured_by_key.get(message.message_key)

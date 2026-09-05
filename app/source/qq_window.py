@@ -33,9 +33,9 @@ class QqWindowReader:
         windows = desktop.windows(visible_only=True)
         candidates = [
             window for window in windows
-            if self.config.group_name.casefold() in (window.window_text() or "").casefold()
+            if any(name.casefold() in (window.window_text() or "").casefold() for name in self.config.listener_names)
         ]
-        if not candidates and self.config.group_name:
+        if not candidates and self.config.listener_names:
             # QQ NT 的顶层窗口标题通常只有“QQ”，群名位于内部会话控件中。
             # 此时用 UIA 文本做第二级匹配，兼容截图所示的窗口结构。
             for window in windows:
@@ -44,14 +44,20 @@ class QqWindowReader:
                         normalize_text(control.window_text())
                         for control in window.descendants(control_type="Text")
                     ]
-                    if any(self.config.group_name.casefold() in text.casefold() for text in texts if text):
+                    if any(
+                        name.casefold() in text.casefold()
+                        for name in self.config.listener_names
+                        for text in texts
+                        if text
+                    ):
                         candidates.append(window)
                 except Exception:
                     continue
         if not candidates:
             titles = [window.window_text() for window in windows if window.window_text()]
             suffix = f"；检测到的窗口：{', '.join(titles[:8])}" if titles else ""
-            raise RuntimeError(f"没有找到包含“{self.config.group_name}”的可见 QQ 窗口{suffix}")
+            names = "、".join(self.config.listener_names)
+            raise RuntimeError(f"没有找到包含“{names}”的可见 QQ 窗口{suffix}")
         return candidates[0]
 
     def _texts(self, window: Any) -> list[str]:
@@ -63,7 +69,7 @@ class QqWindowReader:
                 continue
             if not text or text in self.config.exclude_texts:
                 continue
-            if self.config.group_name and text == self.config.group_name:
+            if text in self.config.listener_names:
                 continue
             # 去掉明显的窗口控件文本；详细规则可在配置中扩展。
             if text in {"发送", "消息", "表情", "图片", "文件", "更多"}:
@@ -96,7 +102,7 @@ class QqWindowReader:
             if count <= previous:
                 continue
             for ordinal in range(previous + 1, count + 1):
-                key_material = f"{self.config.group_name}\0{content}\0{ordinal}"
+                key_material = f"{self.config.listener_names}\0{content}\0{ordinal}"
                 key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
                 messages.append(IncomingMessage.create(key, self.config.group_name, content))
         # 只增加计数，不因旧消息滚出窗口而减少，避免窗口滚动造成大范围重放。

@@ -76,7 +76,8 @@ class QqWindowImageReader:
             return False
         return cls._is_qq_process_path(process_path)
 
-    def _group_window(self) -> Any | None:
+    def _group_window(self, group_name: str | None = None) -> Any | None:
+        target_group = _normal(group_name or self.config.group_name)
         candidates: list[Any] = []
         for window in self._desktop().windows(visible_only=True):
             try:
@@ -86,7 +87,7 @@ class QqWindowImageReader:
                     continue
                 title = _normal(window.window_text())
                 searchable = " ".join([title, *self._texts(window)]).casefold()
-                if self.config.group_name.casefold() in searchable:
+                if target_group.casefold() in searchable:
                     candidates.append(window)
             except Exception:
                 continue
@@ -129,8 +130,9 @@ class QqWindowImageReader:
         except Exception:
             return 0
 
-    def _open_group(self) -> Any | None:
-        window = self._group_window()
+    def _open_group(self, group_name: str | None = None) -> Any | None:
+        target_group = _normal(group_name or self.config.group_name)
+        window = self._group_window(target_group)
         if window is not None:
             try:
                 window.set_focus()
@@ -139,7 +141,7 @@ class QqWindowImageReader:
             return window
         window = self._qq_window()
         if window is None:
-            LOGGER.warning("未找到可操作的 QQ 主窗口，无法自动打开群聊：%s", self.config.group_name)
+            LOGGER.warning("未找到可操作的 QQ 主窗口，无法自动打开群聊：%s", target_group)
             return None
         try:
             window.set_focus()
@@ -153,14 +155,14 @@ class QqWindowImageReader:
                 return None
             search = edits[-1]
             search.set_focus()
-            search.set_edit_text(self.config.group_name)
+            search.set_edit_text(target_group)
             search.type_keys("{ENTER}", set_foreground=True)
         except Exception as exc:
-            LOGGER.warning("自动打开 QQ 群聊失败 group=%s error=%s", self.config.group_name, type(exc).__name__)
+            LOGGER.warning("自动打开 QQ 群聊失败 group=%s error=%s", target_group, type(exc).__name__)
             return None
         deadline = time.monotonic() + self.config.ui_image_wait_seconds
         while time.monotonic() < deadline:
-            found = self._group_window()
+            found = self._group_window(target_group)
             if found is not None:
                 try:
                     found.set_focus()
@@ -168,7 +170,7 @@ class QqWindowImageReader:
                     pass
                 return found
             time.sleep(0.4)
-        LOGGER.warning("自动打开 QQ 群聊超时 group=%s", self.config.group_name)
+        LOGGER.warning("自动打开 QQ 群聊超时 group=%s", target_group)
         return None
 
     @staticmethod
@@ -212,7 +214,13 @@ class QqWindowImageReader:
                 pass
         return False
 
-    def _copy_control_to_file(self, window: Any, image: Any, target: Path) -> Path | None:
+    def _copy_control_to_file(
+        self,
+        window: Any,
+        image: Any,
+        target: Path,
+        group_name: str | None = None,
+    ) -> Path | None:
         try:
             import win32clipboard
             clipboard_sequence = win32clipboard.GetClipboardSequenceNumber()
@@ -224,7 +232,7 @@ class QqWindowImageReader:
                 image.click_input()
                 window.type_keys("^c", set_foreground=True)
         except Exception as exc:
-            LOGGER.warning("复制 QQ 图片到剪贴板失败 group=%s error=%s", self.config.group_name, type(exc).__name__)
+            LOGGER.warning("复制 QQ 图片到剪贴板失败 group=%s error=%s", group_name or self.config.group_name, type(exc).__name__)
             return None
 
         try:
@@ -251,17 +259,23 @@ class QqWindowImageReader:
             time.sleep(0.25)
         return None
 
-    def capture_many(self, message_keys: list[str], directory: Path) -> list[Path | None]:
+    def capture_many(
+        self,
+        message_keys: list[str],
+        directory: Path,
+        group_name: str | None = None,
+    ) -> list[Path | None]:
         """按消息顺序复制最近的多张图片，避免聚合通知只复制最后一张。"""
         if not message_keys:
             return []
-        window = self._open_group()
+        target_group = _normal(group_name or self.config.group_name)
+        window = self._open_group(target_group)
         if window is None:
             return [None for _ in message_keys]
         try:
             controls = self._image_controls(window)
             if not controls:
-                LOGGER.warning("QQ A 群窗口未找到可复制的 Image 控件 group=%s", self.config.group_name)
+                LOGGER.warning("QQ A 群窗口未找到可复制的 Image 控件 group=%s", target_group)
                 return [None for _ in message_keys]
             controls.sort(key=lambda control: (control.rectangle().bottom, control.rectangle().right))
             selected = controls[-len(message_keys):]
@@ -270,7 +284,7 @@ class QqWindowImageReader:
                 selected = [None] * (len(message_keys) - len(selected)) + selected
             LOGGER.info("QQ A 群找到图片控件 count=%d，准备复制=%d", len(controls), len(message_keys))
         except Exception as exc:
-            LOGGER.warning("读取 QQ 图片控件失败 group=%s error=%s", self.config.group_name, type(exc).__name__)
+            LOGGER.warning("读取 QQ 图片控件失败 group=%s error=%s", target_group, type(exc).__name__)
             return [None for _ in message_keys]
 
         results: list[Path | None] = []
@@ -279,12 +293,12 @@ class QqWindowImageReader:
                 results.append(None)
                 continue
             target = directory / f"{message_key[:24]}.png"
-            result = self._copy_control_to_file(window, image, target)
+            result = self._copy_control_to_file(window, image, target, target_group)
             if result is None:
-                LOGGER.warning("QQ 图片复制失败 key=%s group=%s", message_key[:12], self.config.group_name)
+                LOGGER.warning("QQ 图片复制失败 key=%s group=%s", message_key[:12], target_group)
             results.append(result)
         return results
 
-    def capture(self, message_key: str, directory: Path) -> Path | None:
+    def capture(self, message_key: str, directory: Path, group_name: str | None = None) -> Path | None:
         """复制最新可见图片并保存；失败返回 None。"""
-        return self.capture_many([message_key], directory)[0]
+        return self.capture_many([message_key], directory, group_name)[0]

@@ -1,6 +1,6 @@
-# Windows QQ 群消息转发器
+# Windows QQ 消息转发器
 
-这是一个独立的 Windows 项目，用于监听 Windows 通知栏中的 QQ A 群通知，并将文本和可取得的图片转发到 B 群的 QQ 官方机器人。
+这是一个独立的 Windows 项目，用于监听 Windows 通知栏中的 QQ 群或联系人通知，并将文本和可取得的图片转发到 B 群的 QQ 官方机器人。
 
 ```text
 QQ Windows 通知栏
@@ -16,7 +16,7 @@ B 群
 
 ## 重要限制
 
-这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目通过 Windows `UserNotificationListener` API 读取系统通知历史；API 不可用时自动回退到 Windows UI Automation。图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
+这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目通过 Windows `UserNotificationListener` API 读取系统通知历史；API 不可用或没有返回可匹配通知、但屏幕上存在可见通知时，自动回退到 Windows UI Automation。图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
 
 - 只能读取 Windows 通知栏中实际出现的实时通知；
 - `UserNotificationListener` 读取的是 Windows 通知记录，不是 QQ 服务器消息；服务启动时会把已有通知作为基线，不会补发启动前的通知；
@@ -55,7 +55,18 @@ Copy-Item config.example.toml config.toml
 $env:QQ_BOT_CLIENT_SECRET = "替换为机器人密钥"
 ```
 
-然后编辑 `config.toml`，至少填写通知弹窗中的目标 A 群名称 `group_name` 和 B 群 `group_openid`。群名使用精确匹配；A 群改名后只需修改 `group_name`。
+然后编辑 `config.toml`，至少填写 Windows 通知中显示的 QQ 会话名称和 B 群 `group_openid`。会话名称可以是群名，也可以是联系人昵称，使用精确匹配；也可以在 Web UI 的“监听 QQ 会话”区域维护多个监听对象。
+
+多个监听会话配置示例：
+
+```toml
+[source]
+listener_names = ["发家致富", "第二个群", "联系人昵称"]
+group_name = "发家致富" # 兼容旧配置，始终保持为列表第一个会话名称
+group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配置
+```
+
+新增或删除监听会话前需要先停止转发服务。保存后重启转发服务即可生效；每条消息会保留实际来源会话名称，图片复制也会切换到对应 QQ 会话。
 
 转发到 B 群的文本消息会自动带上监听到消息时的本机时间，例如：`[A群转发] [2026-09-05 14:30:00] 小明: 你好`。时间取自通知被监听到的时间，并按 Windows 本地时区显示；已取得原图的图片消息仍以单独图片消息发送，图片通知未取得原图时会在占位文本中显示时间。
 
@@ -67,13 +78,13 @@ $env:QQ_BOT_CLIENT_SECRET = "替换为机器人密钥"
 .\.venv\Scripts\python.exe -m app.main inspect-window --config config.toml
 ```
 
-命令会输出当前可见通知弹窗和文本。先根据输出确认 QQ 通知是否包含 `QQ`、群名和消息正文。通知监听不需要打开 A 群聊天窗口。
+命令会输出当前可见通知弹窗和文本。先根据输出确认 QQ 通知是否包含 `QQ`、会话名称和消息正文。通知监听不需要打开对应 QQ 会话窗口。
 
 ## 图片获取
 
 图片通知的处理顺序为：
 
-1. 自动打开或切换到 `group_name` 对应的 QQ 群；
+1. 自动打开或切换到监听会话名称对应的 QQ 群或联系人会话；
 2. 选择聊天区最下方可见的图片控件并发送复制操作；
 3. 从 Windows 图片剪贴板保存 PNG，上传到 B 群；
 4. UI 自动化失败时，再尝试 QQ 本地缓存；最后回退为 `[图片]` 占位提示。
@@ -164,7 +175,7 @@ Get-CimInstance Win32_Process |
 已包含：
 
 - Windows `UserNotificationListener` API 读取 QQ 通知记录，不读取 QQ 聊天主窗口；API 不可用时回退到 UI Automation；
-- 使用 `group_name` 精确过滤 A 群；
+- 使用 `listener_names` 精确过滤 QQ 群或联系人会话；
 - Windows 聚合多个 QQ 通知时只提取目标群紧邻的消息正文；
 - 短时间内容去重，避免通知控件重建导致重复转发；
 - 图片通知自动通过 QQ 窗口复制，失败时匹配 QQ 本地缓存，再失败时转发 `[图片]` 提示；
