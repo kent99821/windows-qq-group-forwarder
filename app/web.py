@@ -43,6 +43,19 @@ class ForwarderController:
             self.last_exit_code = self.process.returncode
             self.process = None
 
+    def _forwarder_lock_path(self) -> Path:
+        return self.config_path.parent / "data" / "forwarder.lock"
+
+    def _forwarder_lock_is_held(self) -> bool:
+        """Detect a forwarder started by another control console or terminal."""
+        probe = SingleInstanceLock(self._forwarder_lock_path(), "转发服务")
+        try:
+            probe.acquire()
+        except SingleInstanceError:
+            return True
+        probe.release()
+        return False
+
     def status(self) -> dict[str, Any]:
         with self.lock:
             self._reap()
@@ -59,9 +72,12 @@ class ForwarderController:
                         store.close()
                 except Exception as exc:
                     config_error = str(exc)
+            own_running = self._alive()
+            external_running = not own_running and self._forwarder_lock_is_held()
             return {
-                "running": self._alive(),
+                "running": own_running or external_running,
                 "pid": self.process.pid if self._alive() and self.process else None,
+                "external_instance": external_running,
                 "started_at": self.started_at,
                 "last_exit_code": self.last_exit_code,
                 "last_action_error": self.last_action_error,
@@ -77,6 +93,8 @@ class ForwarderController:
             self.last_action_error = None
             if self._alive():
                 return self.status()
+            if self._forwarder_lock_is_held():
+                raise RuntimeError("检测到已有转发服务正在运行，请先关闭原转发窗口或控制台")
             config = self.config()
             effective_dry_run = config.runtime.dry_run if dry_run is None else dry_run
             command = [sys.executable, "-m", "app.main", "run", "--config", str(self.config_path)]
@@ -101,6 +119,13 @@ class ForwarderController:
             # The child owns the file descriptor after spawning on Windows.
             log_handle.close()
             self.started_at = time.time()
+            # Surface immediate startup failures instead of reporting a false success.
+            for _ in range(10):
+                if self.process.poll() is not None:
+                    exit_code = self.process.returncode
+                    self._reap()
+                    raise RuntimeError(f"转发服务启动失败，退出码：{exit_code}")
+                time.sleep(0.05)
             return self.status()
 
     def stop(self) -> dict[str, Any]:

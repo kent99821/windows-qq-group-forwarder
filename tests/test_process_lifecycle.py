@@ -4,7 +4,7 @@ import subprocess
 import pytest
 
 from app.single_instance import SingleInstanceError, SingleInstanceLock
-from app.web import serve_server
+from app.web import ForwarderController, serve_server
 
 
 def test_single_instance_lock_blocks_second_holder(tmp_path: Path) -> None:
@@ -19,6 +19,40 @@ def test_single_instance_lock_blocks_second_holder(tmp_path: Path) -> None:
         first.release()
     second.acquire()
     second.release()
+
+
+def test_controller_detects_forwarder_started_elsewhere(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'''[source]\n'''
+        f'''group_name = "A 群"\n'''
+        f'''app_name_contains = "QQ"\n'''
+        f'''poll_interval_seconds = 1.0\n'''
+        f'''exclude_texts = []\n\n'''
+        f'''[destination]\n'''
+        f'''app_id = "app"\n'''
+        f'''client_secret_env = "QQ_BOT_CLIENT_SECRET"\n'''
+        f'''group_openid = "group"\n'''
+        f'''message_prefix = "[转发]"\n\n'''
+        f'''[runtime]\n'''
+        f'''database_path = "{data_dir.as_posix()}/state.sqlite3"\n'''
+        f'''log_path = "{data_dir.as_posix()}/forwarder.log"\n'''
+        f'''dry_run = true\n'''
+        f'''max_send_attempts = 1\n''',
+        encoding="utf-8",
+    )
+    controller = ForwarderController(config_path)
+    lock = SingleInstanceLock(data_dir / "forwarder.lock", "转发服务")
+    lock.acquire()
+    try:
+        status = controller.status()
+        assert status["running"] is True
+        assert status["external_instance"] is True
+        with pytest.raises(RuntimeError, match="已有转发服务"):
+            controller.start(dry_run=True)
+    finally:
+        lock.release()
 
 
 class FakeController:

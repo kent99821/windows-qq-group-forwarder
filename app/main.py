@@ -97,7 +97,12 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
             if not config.runtime.dry_run:
                 sender = OfficialQqBotSender(config.destination)
                 await sender.start()
-            logger.info("Windows QQ 转发器已启动 source_group=%s dry_run=%s", config.source.group_name, config.runtime.dry_run)
+            logger.info(
+                "Windows QQ 转发器已启动 source_group=%s notification_backend=%s dry_run=%s",
+                config.source.group_name,
+                reader.backend_name,
+                config.runtime.dry_run,
+            )
             while True:
                 try:
                     messages = reader.poll()

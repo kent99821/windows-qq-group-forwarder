@@ -4,7 +4,7 @@
 
 ```text
 QQ Windows 通知栏
-        │ Windows UI Automation 实时 toast
+        │ Windows UserNotificationListener API
         ▼
 本项目：解析、去重、本地队列、重试
         │ QQ 图片缓存探测（图片通知）
@@ -16,9 +16,10 @@ B 群
 
 ## 重要限制
 
-这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目先通过 Windows UI Automation 读取实时通知；图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
+这是个人 QQ 的“尽力转发”实现。QQ Windows 客户端没有向第三方公开个人账号群消息 API，因此本项目通过 Windows `UserNotificationListener` API 读取系统通知历史；API 不可用时自动回退到 Windows UI Automation。图片通知会进一步自动打开目标群并尝试复制最新图片，存在以下限制：
 
 - 只能读取 Windows 通知栏中实际出现的实时通知；
+- `UserNotificationListener` 读取的是 Windows 通知记录，不是 QQ 服务器消息；服务启动时会把已有通知作为基线，不会补发启动前的通知；
 - Windows 通知关闭、QQ 免打扰或通知被系统聚合时可能漏消息；
 - Windows 图片通知通常只包含 `[图片]` 占位符；程序会尝试从 QQ NT 本地图片缓存中匹配通知前后新写入的原图，匹配不到时回退为图片提示；
 - 图片自动复制需要 QQ 窗口可操作，并可能短暂抢占前台焦点；Windows 锁屏、QQ 未登录、QQ UIA 未暴露图片控件时会回退；
@@ -38,6 +39,8 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item config.example.toml config.toml
 ```
+
+项目优先使用 Windows `UserNotificationListener` API。首次使用或权限变化后，请在 Windows 设置中允许应用访问通知；如果该 API 返回权限不足，程序会自动使用 UI Automation 读取可见通知。运行 `inspect-window` 后，输出中的 `backend` 应为 `windows-user-notification-listener`，表示当前使用的是 API。
 
 运行测试时额外安装开发依赖：
 
@@ -121,6 +124,8 @@ image_cache_wait_seconds = 5.0
 
 `start.ps1` 会启动本机 Web 控制面，默认地址为 `http://127.0.0.1:8765`。页面可以启动、停止、重启转发进程，切换 dry-run，查看队列统计和日志，并执行 QQ 通知弹窗诊断。
 
+如果转发服务是从其他控制台或旧的 Web 控制面启动的，页面会通过单实例锁识别它，并显示“其他窗口启动”；此时启动按钮会给出明确提示，不会重复创建进程。请先关闭原控制台中的转发服务，再刷新页面操作。
+
 Web 控制面和转发服务都带有单实例锁，重复启动时会提示已有实例运行。Windows 虚拟环境可能为一个服务显示“启动器 + 实际解释器”两个 Python 进程，这是正常现象；不应同时出现两个 `app.main run` 实例。
 
 在启动 `start.ps1` 的 PowerShell 中按 `Ctrl+C` 会同时关闭 Web 控制面和它启动的整棵转发进程树。也可以先在网页点击“停止”只关闭转发服务。
@@ -158,7 +163,7 @@ Get-CimInstance Win32_Process |
 
 已包含：
 
-- Windows UI Automation 读取 QQ 实时通知弹窗，不读取 QQ 聊天主窗口；
+- Windows `UserNotificationListener` API 读取 QQ 通知记录，不读取 QQ 聊天主窗口；API 不可用时回退到 UI Automation；
 - 使用 `group_name` 精确过滤 A 群；
 - Windows 聚合多个 QQ 通知时只提取目标群紧邻的消息正文；
 - 短时间内容去重，避免通知控件重建导致重复转发；

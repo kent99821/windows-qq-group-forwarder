@@ -19,8 +19,91 @@ def normalize_text(value: str) -> str:
     return " ".join((value or "").split()).strip()
 
 
+class _UserNotificationListenerBackend:
+    """Read Windows toast history through the WinRT UserNotificationListener API."""
+
+    def __init__(self, config: SourceConfig) -> None:
+        try:
+            from winrt.windows.ui.notifications import NotificationKinds
+            from winrt.windows.ui.notifications.management import (
+                UserNotificationListener,
+                UserNotificationListenerAccessStatus,
+            )
+        except ImportError as exc:
+            raise RuntimeError("缺少 Windows WinRT 通知依赖") from exc
+
+        self._notification_kinds = NotificationKinds
+        self._listener = UserNotificationListener.current
+        status = self._listener.get_access_status()
+        if status != UserNotificationListenerAccessStatus.ALLOWED:
+            status_name = getattr(status, "name", str(status))
+            raise RuntimeError(
+                f"Windows UserNotificationListener 权限不可用（{status_name}）；将回退 UI Automation"
+            )
+        self.config = config
+
+    @staticmethod
+    def _notification_texts(notification: Any) -> list[str]:
+        values: list[str] = []
+        try:
+            bindings = notification.notification.visual.bindings
+        except Exception:
+            return values
+        for binding in bindings:
+            try:
+                text_elements = binding.get_text_elements()
+            except Exception:
+                continue
+            for element in text_elements:
+                try:
+                    value = normalize_text(element.text)
+                except Exception:
+                    continue
+                if value and value not in values:
+                    values.append(value)
+        return values
+
+    @staticmethod
+    def _app_name(notification: Any) -> str:
+        try:
+            display_info = notification.app_info.display_info
+            return normalize_text(display_info.display_name)
+        except Exception:
+            return ""
+
+    def scan(self) -> list[tuple[str, str, str, str]]:
+        try:
+            notifications = self._listener.get_notifications_async(
+                self._notification_kinds.TOAST
+            ).get()
+        except Exception as exc:
+            raise RuntimeError(f"读取 Windows 通知 API 失败：{type(exc).__name__}") from exc
+
+        results: list[tuple[str, str, str, str]] = []
+        for notification in notifications:
+            app = self._app_name(notification)
+            texts = self._notification_texts(notification)
+            if not app or not texts:
+                continue
+            try:
+                notification_id = int(notification.id)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            identity = f"winrt:{app}:{notification_id}"
+            results.extend(
+                WindowsNotificationReader._candidate_items_from_texts(
+                    self.config,
+                    identity,
+                    app,
+                    texts,
+                    "UserNotification",
+                )
+            )
+        return results
+
+
 class WindowsNotificationReader:
-    """读取 Windows 通知弹窗，不读取 QQ 主窗口内容。"""
+    """优先通过 WinRT API 读取 Windows 通知，必要时回退到 UI Automation。"""
 
     def __init__(self, config: SourceConfig) -> None:
         self.config = config
@@ -32,6 +115,13 @@ class WindowsNotificationReader:
         # 也可能变化；短时间内容去重用于避免同一 toast 被反复转发。
         self._recent_content: dict[str, float] = {}
         self._last_content_counts: Counter[str] = Counter()
+        self._backend_name = "windows-user-notification-listener"
+        try:
+            self._api_backend: _UserNotificationListenerBackend | None = _UserNotificationListenerBackend(config)
+        except RuntimeError as exc:
+            LOGGER.warning("Windows 通知 API 不可用：%s", exc)
+            self._api_backend = None
+            self._backend_name = "windows-toast-uia-fallback"
 
     def _windows(self) -> list[Any]:
         try:
@@ -39,6 +129,10 @@ class WindowsNotificationReader:
         except ImportError as exc:
             raise RuntimeError("缺少 pywinauto，请先安装 requirements.txt") from exc
         return Desktop(backend="uia").windows(visible_only=True)
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_name
 
     @staticmethod
     def _small_window(window: Any) -> bool:
@@ -85,29 +179,31 @@ class WindowsNotificationReader:
             pass
         return "fallback:" + hashlib.sha256("\0".join(texts).encode("utf-8")).hexdigest()
 
-    def _candidate_items(self, window: Any) -> list[tuple[str, str, str, str]]:
-        if not self._small_window(window):
-            return []
-        texts = self._texts(window)
+    @staticmethod
+    def _candidate_items_from_texts(
+        config: SourceConfig,
+        identity: str,
+        title: str,
+        texts: list[str],
+        class_name: str,
+    ) -> list[tuple[str, str, str, str]]:
         if not texts:
             return []
-        title = normalize_text(window.window_text())
-        class_name = normalize_text(getattr(window.element_info, "class_name", ""))
         searchable = " ".join([title, class_name, *texts]).casefold()
-        app_match = self.config.app_name_contains.casefold() in searchable
+        app_match = config.app_name_contains.casefold() in searchable
         # QQ 的不同版本对通知来源名称暴露方式不同。有的把 QQ 暴露为
         # Text，有的只暴露 Windows toast 的 CoreWindow 类名；两者都允许。
         core_window = class_name.casefold() == "windows.ui.core.corewindow"
         if not app_match and not core_window:
             return []
-        group_name = normalize_text(self.config.group_name).casefold()
+        group_name = normalize_text(config.group_name).casefold()
         group_indexes = [
             index for index, text in enumerate(texts)
             if normalize_text(text).casefold() == group_name
         ]
         if not group_indexes:
             return []
-        excluded = {item.casefold() for item in self.config.exclude_texts}
+        excluded = {item.casefold() for item in config.exclude_texts}
         bodies: list[str] = []
         for group_index in group_indexes:
             # Windows 可能把多个 QQ toast 聚合到同一个顶层窗口。群名后面
@@ -118,7 +214,7 @@ class WindowsNotificationReader:
                 folded = value.casefold()
                 if not value or folded == group_name:
                     continue
-                if self.config.app_name_contains.casefold() in folded:
+                if config.app_name_contains.casefold() in folded:
                     continue
                 if folded in excluded or value in ACTION_TEXTS:
                     continue
@@ -129,18 +225,33 @@ class WindowsNotificationReader:
                 bodies.append(value)
             if bodies:
                 break
-        identity = self._identity(window, texts)
-        app = title or self.config.app_name_contains
+        app = title or config.app_name_contains
         return [
             (f"{identity}:item:{index}", app, body, class_name)
             for index, body in enumerate(bodies)
         ]
 
+    def _candidate_items(self, window: Any) -> list[tuple[str, str, str, str]]:
+        if not self._small_window(window):
+            return []
+        texts = self._texts(window)
+        if not texts:
+            return []
+        title = normalize_text(window.window_text())
+        class_name = normalize_text(getattr(window.element_info, "class_name", ""))
+        return self._candidate_items_from_texts(
+            self.config,
+            self._identity(window, texts),
+            title,
+            texts,
+            class_name,
+        )
+
     def _candidate(self, window: Any) -> tuple[str, str, str, str] | None:
         items = self._candidate_items(window)
         return items[0] if items else None
 
-    def _scan(self) -> list[tuple[str, str, str, str]]:
+    def _scan_uia(self) -> list[tuple[str, str, str, str]]:
         results: list[tuple[str, str, str, str]] = []
         for window in self._windows():
             try:
@@ -151,6 +262,16 @@ class WindowsNotificationReader:
                 if candidate not in results:
                     results.append(candidate)
         return results
+
+    def _scan(self) -> list[tuple[str, str, str, str]]:
+        if self._api_backend is not None:
+            try:
+                return self._api_backend.scan()
+            except RuntimeError as exc:
+                LOGGER.warning("Windows 通知 API 读取失败，将回退 UI Automation：%s", exc)
+                self._api_backend = None
+                self._backend_name = "windows-toast-uia-fallback"
+        return self._scan_uia()
 
     def _fingerprint(self, identity: str, app: str, body: str) -> str:
         return hashlib.sha256(f"{identity}\0{app}\0{self.config.group_name}\0{body}".encode("utf-8")).hexdigest()
@@ -242,6 +363,20 @@ class WindowsNotificationReader:
         return found
 
     def inspect(self) -> dict[str, object]:
+        if self._api_backend is not None:
+            scanned = self._scan()
+            notifications = [
+                {
+                    "window_title": app,
+                    "class_name": class_name,
+                    "identity": identity,
+                    "texts": [self.config.group_name, body],
+                    "body": body,
+                }
+                for identity, app, body, class_name in scanned
+            ]
+            return {"backend": self._backend_name, "notifications": notifications}
+
         notifications: list[dict[str, object]] = []
         for window in self._windows():
             if not self._small_window(window):
@@ -260,4 +395,4 @@ class WindowsNotificationReader:
                 "texts": texts,
                 "body": body,
             })
-        return {"backend": "windows-toast-uia", "notifications": notifications}
+        return {"backend": self._backend_name, "notifications": notifications}

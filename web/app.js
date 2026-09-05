@@ -19,14 +19,17 @@ async function refreshStatus() {
     const running = status.running;
     $("status-badge").textContent = running ? "运行中" : "已停止";
     $("status-badge").className = `badge ${running ? "online" : "offline"}`;
-    $("process-value").textContent = running ? `PID ${status.pid}` : "未运行";
+    $("process-value").textContent = running
+      ? (status.pid ? `PID ${status.pid}` : (status.external_instance ? "其他窗口启动" : "运行中"))
+      : "未运行";
     $("pending-value").textContent = status.messages?.pending ?? 0;
     $("sent-value").textContent = status.messages?.sent ?? 0;
     $("discarded-value").textContent = status.messages?.discarded ?? 0;
-    $("status-detail").textContent = status.config_error || (status.config_exists ? status.config_path : "未找到 config.toml");
+    $("status-detail").textContent = status.config_error
+      || (status.external_instance ? "已有其他窗口启动的转发服务，请在原窗口停止后再操作。" : (status.config_exists ? status.config_path : "未找到 config.toml"));
     $("start-button").disabled = running;
-    $("stop-button").disabled = !running;
-    $("restart-button").disabled = !running;
+    $("stop-button").disabled = !running || status.external_instance;
+    $("restart-button").disabled = !running || status.external_instance;
     $("bind-button").disabled = running;
   } catch (error) {
     $("status-badge").textContent = "控制面异常";

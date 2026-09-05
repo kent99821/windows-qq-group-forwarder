@@ -99,6 +99,18 @@ def test_other_group_notification_is_rejected() -> None:
     assert reader._candidate(OtherGroupWindow()) is None
 
 
+def test_user_notification_listener_parser_uses_app_and_notification_texts() -> None:
+    items = WindowsNotificationReader._candidate_items_from_texts(
+        source_config(),
+        "winrt:QQ:123",
+        "QQ",
+        ["发家致富", "家欣：WinRT API 消息"],
+        "UserNotification",
+    )
+
+    assert items == [("winrt:QQ:123:item:0", "QQ", "家欣：WinRT API 消息", "UserNotification")]
+
+
 def test_image_placeholder_has_distinct_kind() -> None:
     reader = WindowsNotificationReader(source_config())
     message = reader._message("QQ", "家欣：[图片]")

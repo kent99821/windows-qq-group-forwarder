@@ -22,6 +22,10 @@ button { border: 1px solid #cbd5e1; background: #fff; color: #1e293b; border-rad
 button:hover:not(:disabled) { border-color: #64748b; background: #f8fafc; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button.primary { background: #2563eb; color: white; border-color: #2563eb; }
+button.primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; color: white; box-shadow: 0 6px 14px rgba(37, 99, 235, .24); transform: translateY(-1px); }
+button.primary:active:not(:disabled) { background: #1e40af; border-color: #1e40af; transform: translateY(0); box-shadow: none; }
+button:focus-visible { outline: 3px solid rgba(37, 99, 235, .3); outline-offset: 2px; }
+button { transition: background .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 input { accent-color: #2563eb; width: 18px; height: 18px; }
 pre { background: #0f172a; color: #cbd5e1; min-height: 160px; max-height: 330px; overflow: auto; border-radius: 12px; padding: 16px; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; }

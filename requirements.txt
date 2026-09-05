@@ -2,3 +2,8 @@ qqbot-agent-sdk==1.2.2
 httpx>=0.27,<1
 pywinauto>=0.6.8,<1
 Pillow>=10,<13
+winrt-Windows.ApplicationModel==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.UI.Notifications==3.2.1
+winrt-Windows.UI.Notifications.Management==3.2.1
