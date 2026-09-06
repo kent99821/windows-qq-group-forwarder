@@ -11,7 +11,7 @@
     <header>
       <p class="eyebrow">LOCAL CONTROL PLANE</p>
       <h1>Windows QQ 消息转发器</h1>
-      <p class="lede">监听 Windows 通知栏中的 QQ 群或联系人消息，并将文本及可取得的图片转发到 B 群官方机器人。</p>
+      <p class="lede">监听 Windows 通知栏中的 QQ 群或联系人消息，并将文本及可取得的图片转发到 QQ 群官方机器人。</p>
       <div class="header-note"><span class="header-dot"></span><span>本机运行 · Windows 专用</span><span class="header-divider">/</span><span>消息仅保存在本地队列</span></div>
     </header>
 
@@ -40,7 +40,7 @@
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label"><strong>Dry-run</strong><small id="dry-run-state">只监听，不发送</small></span>
         </label>
-        <p id="dry-run-hint" class="muted">开启时只监听通知并入队，不会向 B 群真实发送消息。</p>
+        <p id="dry-run-hint" class="muted">开启时只监听通知并入队，不会向 QQ 群真实发送消息。</p>
       </div>
       <div class="panel">
         <p class="eyebrow">DIAGNOSTICS</p><h2>QQ 通知诊断</h2>
@@ -49,10 +49,10 @@
         <button id="inspect-image-cache-button">检查图片缓存</button>
       </div>
       <div class="panel">
-        <p class="eyebrow">DESTINATION</p><h2>绑定 B 群</h2>
+        <p class="eyebrow">DESTINATION</p><h2>绑定 QQ 群</h2>
         <p class="muted">绑定后可以真实发送一条测试消息，确认机器人主动发言权限和群配置可用。</p>
         <div class="actions compact-actions">
-          <button id="bind-button">绑定 B 群</button>
+          <button id="bind-button">绑定 QQ 群</button>
           <button id="test-message-button" class="primary">发送主动测试</button>
         </div>
       </div>

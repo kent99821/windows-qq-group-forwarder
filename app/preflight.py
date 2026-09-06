@@ -93,9 +93,9 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
     if group_valid:
         value = config.destination.group_openid
         preview = f"{value[:6]}…{value[-4:]}" if len(value) > 12 else "已填写"
-        _append(report, "passed", "group_openid", "B 群绑定", preview)
+        _append(report, "passed", "group_openid", "QQ 群绑定", preview)
     else:
-        _append(report, "missing", "group_openid", "B 群绑定", "尚未绑定 B 群 group_openid")
+        _append(report, "missing", "group_openid", "QQ 群绑定", "尚未绑定 QQ 群 group_openid")
 
     secret = os.environ.get(config.destination.client_secret_env)
     if secret:

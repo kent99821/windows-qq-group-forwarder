@@ -258,7 +258,7 @@ class ForwarderController:
     def bind_destination_group(self) -> dict[str, Any]:
         with self.lock:
             if self._alive():
-                raise RuntimeError("请先停止转发服务，再执行 B 群绑定")
+                raise RuntimeError("请先停止转发服务，再执行 QQ 群绑定")
         config = self.config()
         group_openid = asyncio.run(bind_group(config.destination))
         save_group_openid(self.config_path, group_openid)
@@ -293,13 +293,13 @@ class ForwarderController:
         if _looks_like_unconfigured(config.destination.app_id):
             raise RuntimeError("尚未填写有效的机器人 AppID")
         if _looks_like_unconfigured(config.destination.group_openid):
-            raise RuntimeError("尚未绑定 B 群，请先完成 group_openid 绑定")
+            raise RuntimeError("尚未绑定 QQ 群，请先完成 group_openid 绑定")
         if not os.environ.get(config.destination.client_secret_env):
             raise RuntimeError(f"未读取机器人密钥环境变量 {config.destination.client_secret_env}")
         asyncio.run(self._send_test_message(config))
         value = config.destination.group_openid
         return {
-            "message": "主动测试消息已发送到 B 群",
+            "message": "主动测试消息已发送到 QQ 群",
             "group_openid_preview": f"{value[:6]}…{value[-4:]}",
         }
 

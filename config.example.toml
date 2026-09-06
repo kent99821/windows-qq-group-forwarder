@@ -23,7 +23,7 @@ ui_image_wait_seconds = 8.0
 [destination]
 app_id = "替换为机器人 AppID"
 client_secret_env = "QQ_BOT_CLIENT_SECRET"
-group_openid = "替换为 B 群 group_openid"
+group_openid = "替换为 QQ 群 group_openid"
 message_prefix = "[A群转发]"
 
 [runtime]

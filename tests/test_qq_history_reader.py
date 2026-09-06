@@ -71,6 +71,21 @@ def test_parse_history_uses_avatar_accessible_name_as_sender() -> None:
     assert [(record.sender, record.content) for record in records] == [("家欣", "你好")]
 
 
+def test_parse_history_ignores_member_role_badge_after_nickname() -> None:
+    records = parse_history_nodes(
+        [
+            node("Text", "元来！", (80, 48, 125, 70)),
+            node("Text", "管理员", (130, 48, 180, 70)),
+            node("Group", rect=(80, 74, 300, 130), children=(node("Text", "这几天跟上节奏"),)),
+        ],
+        0,
+        1000,
+        "元子大讲堂9月主升",
+    )
+
+    assert [(record.sender, record.content) for record in records] == [("元来！", "这几天跟上节奏")]
+
+
 def test_parse_history_distinguishes_repeated_visible_messages() -> None:
     records = parse_history_nodes(
         [

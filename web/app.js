@@ -61,12 +61,12 @@ async function refreshStatus() {
     $("discarded-value").textContent = status.messages?.discarded ?? 0;
     if (typeof status.dry_run === "boolean") {
       $("dry-run").checked = status.dry_run;
-      $("dry-run-state").textContent = status.dry_run ? "只监听，不发送" : "真实发送到 B 群";
+      $("dry-run-state").textContent = status.dry_run ? "只监听，不发送" : "真实发送到 QQ 群";
     }
     $("dry-run").disabled = running;
     $("dry-run-hint").textContent = running
       ? "转发服务运行中，运行模式已锁定；请先停止服务后再修改。"
-      : ($("dry-run").checked ? "开启时只监听通知并入队，不会向 B 群真实发送消息。" : "关闭后会向 B 群真实发送消息。");
+      : ($("dry-run").checked ? "开启时只监听通知并入队，不会向 QQ 群真实发送消息。" : "关闭后会向 QQ 群真实发送消息。");
     const credentialWarning = !status.client_secret_configured && !$('dry-run').checked
       ? `当前 Web 控制面未读取 ${status.client_secret_env || "机器人密钥环境变量"}，请重新启动 Web 控制面。`
       : "";
@@ -383,18 +383,18 @@ $("listener-name").addEventListener("keydown", (event) => {
   if (event.key === "Enter") addListenerName();
 });
 $("bind-button").addEventListener("click", async () => {
-  if (!window.confirm("请先停止转发，并准备在 B 群 @机器人发送“绑定”。继续吗？")) return;
+  if (!window.confirm("请先停止转发，并准备在 QQ 群 @机器人发送“绑定”。继续吗？")) return;
   await runButtonTask($("bind-button"), "连接中…", async () => {
-    show("正在连接 QQ 机器人，请在 B 群发送：@机器人 绑定");
+    show("正在连接 QQ 机器人，请在 QQ 群发送：@机器人 绑定");
     const body = await request("/api/actions/bind-group", { method: "POST", body: "{}" });
-    show(`B 群绑定成功：${body.group_openid_preview}`);
+    show(`QQ 群绑定成功：${body.group_openid_preview}`);
     await refreshStatus();
   });
 });
 $("test-message-button").addEventListener("click", async () => {
-  if (!window.confirm("将立即向已绑定的 B 群真实发送一条测试消息，继续吗？")) return;
+  if (!window.confirm("将立即向已绑定的 QQ 群真实发送一条测试消息，继续吗？")) return;
   await runButtonTask($("test-message-button"), "发送中…", async () => {
-    show("正在向 B 群发送主动测试消息…");
+    show("正在向 QQ 群发送主动测试消息…");
     const body = await request("/api/actions/test-message", { method: "POST", body: "{}" });
     show(body.message || "主动测试消息已发送");
   });

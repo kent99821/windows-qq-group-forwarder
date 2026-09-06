@@ -30,7 +30,7 @@ class GatewaySession:
 
 
 async def bind_group(destination: DestinationConfig, *, timeout_seconds: float = 90.0) -> str:
-    """连接 QQ 网关，等待 B 群中 @机器人发送“绑定”，返回 group_openid。"""
+    """连接 QQ 网关，等待 QQ 群中 @机器人发送“绑定”，返回 group_openid。"""
     secret = os.environ.get(destination.client_secret_env)
     if not secret:
         raise RuntimeError(f"环境变量 {destination.client_secret_env} 未设置")
@@ -63,7 +63,7 @@ async def bind_group(destination: DestinationConfig, *, timeout_seconds: float =
         try:
             response = await api.send_text(
                 "group", event.chat_id,
-                "已收到绑定请求，B 群绑定成功。",
+                "已收到绑定请求，QQ 群绑定成功。",
                 reply_to=event.message_id,
                 markdown=False,
             )
@@ -98,7 +98,7 @@ async def bind_group(destination: DestinationConfig, *, timeout_seconds: float =
         websocket.start(gateway_url, loop)
         return await asyncio.wait_for(bound, timeout=timeout_seconds)
     except asyncio.TimeoutError as exc:
-        raise RuntimeError(f"{timeout_seconds:.0f} 秒内未收到 B 群绑定消息，请在 B 群 @机器人 发送：绑定") from exc
+        raise RuntimeError(f"{timeout_seconds:.0f} 秒内未收到 QQ 群绑定消息，请在 QQ 群 @机器人 发送：绑定") from exc
     finally:
         await websocket.async_stop()
         await http_client.aclose()
@@ -167,4 +167,4 @@ async def run_gateway_forever(destination: DestinationConfig, stop_event: asynci
 
 
 async def _ignore_message(_event_type: str, _raw: dict[str, Any]) -> None:
-    """转发服务不消费 B 群事件，避免机器人自身消息形成回路。"""
+    """转发服务不消费 QQ 群事件，避免机器人自身消息形成回路。"""

@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 
 from app.config import SourceConfig
-from app.main import collect_notifications, route_notification_batches
+from app.main import collect_notifications, is_low_value_message, route_notification_batches
 from app.models import IncomingMessage
 from app.source.windows_notification import _UserNotificationListenerBackend
 from app.state_store import StateStore
@@ -80,3 +80,48 @@ def test_router_enqueues_every_text_message_in_one_backfill_batch(tmp_path: Path
             store.close()
 
     assert asyncio.run(scenario()) == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_all_members_only_messages_are_low_value() -> None:
+    messages = [
+        IncomingMessage.create("one", "发家致富", "@所有人"),
+        IncomingMessage.create("two", "发家致富", "＠全体成员"),
+        IncomingMessage.create("three", "发家致富", "元子小助理：@全体成员"),
+        IncomingMessage.create("four", "发家致富", "[特别关心] 元子小助理： @所有人 "),
+    ]
+
+    assert all(is_low_value_message(message) for message in messages)
+
+
+def test_all_members_mention_with_useful_content_is_kept() -> None:
+    message = IncomingMessage.create("useful", "发家致富", "元子小助理：@所有人 请参加会议")
+
+    assert is_low_value_message(message) is False
+
+
+def test_router_does_not_enqueue_all_members_only_message(tmp_path: Path) -> None:
+    async def scenario() -> list[str]:
+        store = StateStore(tmp_path / "state.sqlite3")
+        input_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        image_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        send_signal = asyncio.Event()
+        messages = [
+            IncomingMessage.create("mention", "发家致富", "元子小助理：@全体成员"),
+            IncomingMessage.create("useful", "发家致富", "元来！：正常消息"),
+        ]
+        task = asyncio.create_task(route_notification_batches(
+            input_queue,
+            image_queue,
+            store,
+            send_signal,
+        ))
+        try:
+            await input_queue.put(messages)
+            await asyncio.wait_for(input_queue.join(), timeout=1)
+            return [str(row["content"]) for row in store.pending(limit=20)]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            store.close()
+
+    assert asyncio.run(scenario()) == ["元来！：正常消息"]

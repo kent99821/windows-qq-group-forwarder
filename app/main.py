@@ -5,6 +5,8 @@ import asyncio
 from dataclasses import replace
 import logging
 from pathlib import Path
+import re
+import unicodedata
 
 from .bot_gateway import run_gateway_forever
 from .config import AppConfig, load_config
@@ -16,6 +18,18 @@ from .source.qq_history_reader import QqHistoryReader
 from .source.qq_image_cache import QqImageCache
 from .source.qq_window_image import QqWindowImageReader
 from .state_store import StateStore
+
+
+ALL_MEMBERS_ONLY_PATTERN = re.compile(
+    r"^(?:\[[^\]\r\n]{1,30}\]\s*)?(?:[^:\r\n]{1,80}\s*:\s*)?@\s*(?:所有人|全体成员)\s*$"
+)
+
+
+def is_low_value_message(message: IncomingMessage) -> bool:
+    """Return whether a message only contains QQ's all-members mention."""
+    content = unicodedata.normalize("NFKC", message.content or "")
+    content = " ".join(content.split()).strip()
+    return bool(ALL_MEMBERS_ONLY_PATTERN.fullmatch(content))
 
 
 def setup_logging(path: Path) -> None:
@@ -35,7 +49,7 @@ async def process_pending(config: AppConfig, store: StateStore, sender: Official
             logger.info("dry-run：保留 1 条待发送消息 key=%s", key[:12])
             continue
         if sender is None:
-            raise RuntimeError("真实发送模式下未创建 B 群机器人发送器")
+            raise RuntimeError("真实发送模式下未创建 QQ 群机器人发送器")
         logger.info(
             "准备转发消息 source_group=%s kind=%s content=%s",
             row["source_group"],
@@ -105,6 +119,13 @@ async def collect_notifications(
 
 def enqueue_message(store: StateStore, message: IncomingMessage) -> bool:
     logger = logging.getLogger(__name__)
+    if is_low_value_message(message):
+        logger.info(
+            "过滤无价值的全体成员提醒 source_group=%s content=%s",
+            message.source_group,
+            message.content,
+        )
+        return False
     if store.enqueue(message):
         logger.info(
             "监听到新消息 source_group=%s kind=%s content=%s",
@@ -229,7 +250,7 @@ async def send_pending_forever(
         if config.runtime.dry_run:
             pending_count = store.count("pending")
             if pending_count != last_pending_count:
-                logger.info("dry-run：当前待发送队列 %d 条，未调用 B 群机器人", pending_count)
+                logger.info("dry-run：当前待发送队列 %d 条，未调用 QQ 群机器人", pending_count)
                 last_pending_count = pending_count
         else:
             await process_pending(config, store, sender)
@@ -244,7 +265,7 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
         store = StateStore(config.runtime.database_path)
         discarded = store.discard_legacy_pending()
         if discarded:
-            logging.getLogger(__name__).warning("已废弃 %d 条旧窗口扫描待发送记录，不会发送到 B 群", discarded)
+            logging.getLogger(__name__).warning("已废弃 %d 条旧窗口扫描待发送记录，不会发送到 QQ 群", discarded)
         reader = WindowsNotificationReader(config.source)
         history_reader = QqHistoryReader(config.source)
         image_cache = QqImageCache(config.source)
@@ -322,7 +343,7 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Windows QQ A 群到 B 群转发器")
+    parser = argparse.ArgumentParser(description="Windows QQ A 群到 QQ 群转发器")
     parser.add_argument("command", choices=["run", "inspect-window", "inspect-image-cache", "web"])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

@@ -18,6 +18,13 @@ LOGGER = logging.getLogger(__name__)
 TIME_PATTERN = re.compile(r"^(?:[01]?\d|2[0-3]):[0-5]\d$")
 SENDER_PATTERN = re.compile(r"^([^:：]{1,80})\s*[:：]\s*(.*)$", re.DOTALL)
 NOTIFICATION_BADGE_PATTERN = re.compile(r"^\[[^\]\r\n]{1,30}\]\s*")
+QQ_MEMBER_ROLE_LABELS = frozenset({
+    "管理员".casefold(),
+    "群主".casefold(),
+    "群成员".casefold(),
+    "群管".casefold(),
+    "群主/管理员".casefold(),
+})
 HISTORY_SETTLE_SECONDS = 1.5
 HISTORY_SETTLE_INTERVAL_SECONDS = 0.3
 
@@ -59,6 +66,11 @@ def _contains_image(node: UiNode) -> bool:
         child.control_type == "Image" or _contains_image(child)
         for child in node.children
     )
+
+
+def _is_member_role_label(value: str) -> bool:
+    """QQ puts role badges such as ``管理员`` beside the real nickname."""
+    return _normal(value).casefold() in QQ_MEMBER_ROLE_LABELS
 
 
 def _inside(rect: tuple[int, int, int, int], outer: tuple[int, int, int, int]) -> bool:
@@ -124,6 +136,7 @@ def parse_history_nodes(
             and not node.children
             and node_width <= 100
             and node_height <= 100
+            and not _is_member_role_label(text)
         ):
             current_sender = text
             continue
@@ -136,7 +149,12 @@ def parse_history_nodes(
             # parent. It is content, not the sender of the next message.
             if any(_inside(rect, container) for container in message_containers):
                 continue
-            if incoming_side and text and node_width <= width * 0.45:
+            if (
+                incoming_side
+                and text
+                and node_width <= width * 0.45
+                and not _is_member_role_label(text)
+            ):
                 current_sender = text
             continue
 

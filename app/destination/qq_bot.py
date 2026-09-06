@@ -66,9 +66,9 @@ class OfficialQqBotSender:
                 reply_to=None, markdown=False,
             )
         except Exception as exc:
-            raise RuntimeError(f"B 群机器人发送失败：{exc}") from exc
+            raise RuntimeError(f"QQ 群机器人发送失败：{exc}") from exc
         if not isinstance(response, dict) or not response.get("id"):
-            raise RuntimeError("B 群机器人 API 未返回消息 ID")
+            raise RuntimeError("QQ 群机器人 API 未返回消息 ID")
 
     async def _send_image(self, message: IncomingMessage) -> None:
         if self.http_client is None or self.api is None or not message.media_path:
@@ -95,6 +95,6 @@ class OfficialQqBotSender:
                 ),
             )
         except Exception as exc:
-            raise RuntimeError(f"B 群图片上传或发送失败：{exc}") from exc
+            raise RuntimeError(f"QQ 群图片上传或发送失败：{exc}") from exc
         if not isinstance(response, dict) or not response.get("id"):
-            raise RuntimeError("B 群图片 API 未返回消息 ID")
+            raise RuntimeError("QQ 群图片 API 未返回消息 ID")
