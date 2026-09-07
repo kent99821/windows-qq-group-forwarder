@@ -17,8 +17,19 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .bot_gateway import bind_group
-from .config import AppConfig, load_config, save_dry_run, save_group_openid, save_listener_names
+from .config import (
+    AppConfig,
+    ListenerSession,
+    load_config,
+    save_dry_run,
+    save_group_openid,
+    save_listener_names,
+    save_listener_sessions,
+    save_napcat_settings,
+    save_source_backend,
+)
 from .destination.qq_bot import OfficialQqBotSender
+from .environment import read_user_environment_variable
 from .models import IncomingMessage
 from .preflight import run_preflight
 from .source.qq_history_reader import HistoryRecord, QqHistoryReader
@@ -107,6 +118,20 @@ class ForwarderController:
                 "client_secret_configured": client_secret_configured,
                 "client_secret_env": client_secret_env,
                 "dry_run": config.runtime.dry_run if config_exists and config_error is None else None,
+                "source_backend": config.source.backend if config_exists and config_error is None else None,
+                "napcat": (
+                    {
+                        "enabled": config.napcat.enabled,
+                        "ws_url": config.napcat.ws_url,
+                        "token_env": config.napcat.token_env,
+                        "token_configured": bool(read_user_environment_variable(config.napcat.token_env)),
+                        "sessions": [
+                            {"type": item.type, "id": item.id, "name": item.name}
+                            for item in config.source.sessions
+                        ],
+                    }
+                    if config_exists and config_error is None else None
+                ),
                 "active_dry_run": self.active_dry_run if own_running else None,
                 "restart_required": (
                     own_running
@@ -217,6 +242,51 @@ class ForwarderController:
             result = self.status()
             result["restart_required"] = False
             return result
+
+    def set_source_backend(self, backend: object) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped("切换消息源")
+            if not isinstance(backend, str):
+                raise ValueError("backend 必须是字符串")
+            save_source_backend(self.config_path, backend)
+            return self.status()
+
+    def save_napcat(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped("修改 NapCat 配置")
+            enabled = body.get("enabled")
+            ws_url = body.get("ws_url")
+            token_env = body.get("token_env")
+            if not isinstance(enabled, bool) or not isinstance(ws_url, str) or not isinstance(token_env, str):
+                raise ValueError("NapCat 配置不完整")
+            save_napcat_settings(self.config_path, enabled=enabled, ws_url=ws_url, token_env=token_env)
+            return self.status()
+
+    def add_listener_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped()
+            session = ListenerSession(
+                str(body.get("type", "")),
+                str(body.get("id", "")),
+                str(body.get("name", "")),
+            )
+            config = self.config()
+            if any(item.type == session.type and item.id == session.id for item in config.source.sessions):
+                raise ValueError(f"监听会话已存在：{session.type}/{session.id}")
+            sessions = save_listener_sessions(self.config_path, [*config.source.sessions, session])
+            return {"sessions": [{"type": item.type, "id": item.id, "name": item.name} for item in sessions]}
+
+    def remove_listener_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped()
+            session_type = str(body.get("type", "")).strip().casefold()
+            session_id = str(body.get("id", "")).strip()
+            config = self.config()
+            sessions = [item for item in config.source.sessions if not (item.type == session_type and item.id == session_id)]
+            if len(sessions) == len(config.source.sessions):
+                raise ValueError("未找到指定的 NapCat 监听会话")
+            saved = save_listener_sessions(self.config_path, sessions)
+            return {"sessions": [{"type": item.type, "id": item.id, "name": item.name} for item in saved]}
 
     def _require_forwarder_stopped(self, action: str = "修改监听群列表") -> None:
         if self._alive() or self._forwarder_lock_is_held():
@@ -515,6 +585,18 @@ class ControlHandler(BaseHTTPRequestHandler):
                 result = self.controller.restart(body.get("dry_run"))
             elif path == "/api/actions/dry-run":
                 result = self.controller.set_dry_run(body.get("dry_run"))
+            elif path == "/api/actions/source-backend":
+                result = self.controller.set_source_backend(body.get("backend"))
+            elif path == "/api/actions/napcat":
+                result = self.controller.save_napcat(body)
+            elif path == "/api/actions/listener-sessions":
+                action = body.get("action")
+                if action == "add":
+                    result = self.controller.add_listener_session(body)
+                elif action == "remove":
+                    result = self.controller.remove_listener_session(body)
+                else:
+                    raise ValueError("action 必须是 add 或 remove")
             elif path == "/api/actions/inspect-window":
                 result = self.controller.inspect_window()
             elif path == "/api/actions/inspect-image-cache":

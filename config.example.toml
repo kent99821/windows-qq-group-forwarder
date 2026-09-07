@@ -1,4 +1,6 @@
 [source]
+# 消息来源：windows_notification（默认）或 napcat。
+backend = "windows_notification"
 # 推荐配置：需要监听的 QQ 群名或联系人昵称，使用精确匹配；可在 Web UI 中增删。
 listener_names = ["A群名称", "联系人昵称"]
 # 兼容旧配置：第一个监听会话名称。Web UI 会同步更新下面两个旧字段。
@@ -31,3 +33,25 @@ database_path = "data/forwarder.sqlite3"
 log_path = "data/forwarder.log"
 dry_run = true
 max_send_attempts = 3
+
+[napcat]
+# backend = "napcat" 时启用。NapCat OneBot 只建议绑定本机回环地址。
+enabled = false
+ws_url = "ws://127.0.0.1:3001"
+token_env = "NAPCAT_ONEBOT_TOKEN"
+connect_timeout_seconds = 10.0
+heartbeat_timeout_seconds = 30.0
+reconnect_min_seconds = 1.0
+reconnect_max_seconds = 30.0
+download_timeout_seconds = 20.0
+
+# backend = "napcat" 时取消注释并按实际 QQ 号配置；name 仅用于展示。
+# [[source.sessions]]
+# type = "group"
+# id = "QQ群号"
+# name = "QQ群名称"
+#
+# [[source.sessions]]
+# type = "private"
+# id = "QQ号"
+# name = "联系人昵称"

@@ -73,6 +73,18 @@ async function refreshStatus() {
     $("status-detail").textContent = status.config_error
       || credentialWarning
       || (status.external_instance ? "已有其他窗口启动的转发服务，请在原窗口停止后再操作。" : (status.config_exists ? status.config_path : "未找到 config.toml"));
+    const backend = status.source_backend || "windows_notification";
+    $("source-backend").value = backend;
+    $("source-backend").disabled = running;
+    $("save-source-backend").disabled = running;
+    $("source-backend-badge").textContent = backend === "napcat" ? "NapCat OneBot" : "Windows 通知";
+    $("napcat-settings").hidden = backend !== "napcat";
+    if (status.napcat) {
+      if (document.activeElement !== $("napcat-ws-url")) $("napcat-ws-url").value = status.napcat.ws_url || "";
+      if (document.activeElement !== $("napcat-token-env")) $("napcat-token-env").value = status.napcat.token_env || "";
+      $("napcat-enabled").checked = Boolean(status.napcat.enabled);
+      renderNapcatSessions(status.napcat.sessions || [], running);
+    }
     $("start-button").disabled = running;
     $("stop-button").disabled = !running || status.external_instance;
     $("restart-button").disabled = !running || status.external_instance;
@@ -87,6 +99,87 @@ async function refreshStatus() {
     $("status-badge").className = "badge offline";
     show(error.message);
   }
+}
+
+function renderNapcatSessions(sessions, running) {
+  const list = $("napcat-sessions-list");
+  $("napcat-sessions-count").textContent = sessions.length + " 个";
+  list.replaceChildren();
+  if (!sessions.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "暂无 NapCat 会话，请填写群号或 QQ 号后添加";
+    list.appendChild(empty);
+    return;
+  }
+  sessions.forEach((session) => {
+    const row = document.createElement("div");
+    row.className = "listener-group-row";
+    const copy = document.createElement("span");
+    copy.textContent = (session.type === "group" ? "QQ群" : "联系人") + " · " + (session.name || session.id) + " · ID " + session.id;
+    const remove = document.createElement("button");
+    remove.className = "danger-button";
+    remove.textContent = "删除";
+    remove.disabled = running;
+    remove.addEventListener("click", () => removeNapcatSession(session));
+    row.append(copy, remove);
+    list.appendChild(row);
+  });
+}
+
+async function saveSourceBackend() {
+  await runButtonTask($("save-source-backend"), "保存中…", async () => {
+    await request("/api/actions/source-backend", {
+      method: "POST",
+      body: JSON.stringify({ backend: $("source-backend").value }),
+    });
+    show("消息来源已保存，启动服务时生效");
+    await refreshStatus();
+  });
+}
+
+async function saveNapcatSettings() {
+  await runButtonTask($("save-napcat"), "保存中…", async () => {
+    await request("/api/actions/napcat", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: $("napcat-enabled").checked,
+        ws_url: $("napcat-ws-url").value.trim(),
+        token_env: $("napcat-token-env").value.trim(),
+      }),
+    });
+    show("NapCat 配置已保存，启动服务时生效");
+    await refreshStatus();
+  });
+}
+
+async function addNapcatSession() {
+  const type = $("napcat-session-type").value;
+  const id = $("napcat-session-id").value.trim();
+  const name = $("napcat-session-name").value.trim();
+  if (!id) { show("请输入群号或 QQ 号"); return; }
+  await runButtonTask($("add-napcat-session"), "添加中…", async () => {
+    await request("/api/actions/listener-sessions", {
+      method: "POST",
+      body: JSON.stringify({ action: "add", type, id, name }),
+    });
+    $("napcat-session-id").value = "";
+    $("napcat-session-name").value = "";
+    show("NapCat 监听会话已添加");
+    await refreshStatus();
+  });
+}
+
+async function removeNapcatSession(session) {
+  if (!window.confirm("确定删除“" + (session.name || session.id) + "”吗？")) return;
+  try {
+    await request("/api/actions/listener-sessions", {
+      method: "POST",
+      body: JSON.stringify({ action: "remove", type: session.type, id: session.id }),
+    });
+    show("NapCat 监听会话已删除");
+    await refreshStatus();
+  } catch (error) { show(error.message); }
 }
 
 function renderListenerNames(names, running) {
@@ -361,6 +454,9 @@ $("start-button").addEventListener("click", () => action("/api/actions/start"));
 $("stop-button").addEventListener("click", () => action("/api/actions/stop"));
 $("restart-button").addEventListener("click", () => action("/api/actions/restart"));
 $("preflight-button").addEventListener("click", runPreflight);
+$("save-source-backend").addEventListener("click", saveSourceBackend);
+$("save-napcat").addEventListener("click", saveNapcatSettings);
+$("add-napcat-session").addEventListener("click", addNapcatSession);
 $("dry-run").addEventListener("change", changeDryRun);
 $("refresh-log").addEventListener("click", refreshLog);
 $("inspect-button").addEventListener("click", async () => {

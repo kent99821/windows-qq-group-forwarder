@@ -1,8 +1,8 @@
 # Windows QQ 消息转发器
 
-这是一个独立的 Windows 项目，用于监听 Windows 通知栏中的 QQ 群或联系人通知，并将文本和可取得的图片转发到 B 群的 QQ 官方机器人。
+这是一个独立的 Windows 项目，用于监听 QQ 群或联系人消息，并将文本和可取得的图片转发到 B 群的 QQ 官方机器人。
 
-本项目面向“个人 QQ 在 A 群/联系人中接收消息，官方 QQ 机器人在 B 群中转发消息”的场景。它不需要把机器人加入 A 群，但依赖 Windows 通知、QQ NT 客户端和本机 UI 能力，因此属于本地尽力转发工具。
+本项目面向“个人 QQ 在 A 群/联系人中接收消息，官方 QQ 机器人在 B 群中转发消息”的场景。它不需要把机器人加入 A 群。默认使用 Windows 通知；如果已安装并配置 NapCat，也可以使用 OneBot 11 WebSocket 直接接收消息，减少通知覆盖造成的漏消息。
 
 当前版本定位为“单实例、单目标机器人”。单实例多机器人、多实例管理和资源评估已整理到[未来优化方向](docs/future-optimization-plan.md)，后续版本开发前应先参考该文档。
 
@@ -35,6 +35,7 @@
 - [数据与安全](#数据与安全)
 - [进程管理](#进程管理)
 - [命令行运行](#命令行运行)
+- [NapCat OneBot 模式](#napcat-onebot-模式)
 - [开发与测试](#开发与测试)
 - [未来优化方向](docs/future-optimization-plan.md)
 
@@ -50,7 +51,7 @@ windows-qq-group-forwarder/
 │  ├─ preflight.py             # 运行前检查
 │  ├─ bot_gateway.py           # QQ 机器人绑定和网关保活
 │  ├─ destination/qq_bot.py   # B 群文本/图片发送
-│  └─ source/                  # 通知、QQ 历史和图片来源
+│  └─ source/                  # Windows 通知、NapCat、QQ 历史和图片来源
 ├─ web/                        # Web UI 静态页面
 ├─ tests/                      # 自动化测试
 ├─ config.example.toml         # 配置模板
@@ -161,7 +162,9 @@ group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配
 
 | 配置项 | 作用 | 注意事项 |
 | --- | --- | --- |
+| `source.backend` | 消息来源 | `windows_notification` 或 `napcat`，运行中不可切换 |
 | `source.listener_names` | 监听的群名或联系人昵称 | 精确匹配，可配置多个；修改后需停止服务 |
+| `source.sessions` | NapCat 监听会话 | 使用群号/QQ 号，必须填写稳定 ID；名称只用于展示 |
 | `source.app_name_contains` | 通知应用识别文本 | 通常填写 `QQ` |
 | `source.poll_interval_seconds` | UI Automation 回退轮询间隔 | 通知事件不可用时生效，越小占用越高 |
 | `source.exclude_texts` | 排除的界面文本 | 可根据通知诊断结果补充 |
@@ -177,6 +180,8 @@ group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配
 | `runtime.log_path` | 日志位置 | 日志包含消息正文，应妥善保护 |
 | `runtime.dry_run` | 是否只监听不发送 | 运行中锁定，修改前需停止服务 |
 | `runtime.max_send_attempts` | 单条消息最大尝试次数 | 达到后进入失败队列 |
+| `napcat.ws_url` | NapCat OneBot WebSocket 地址 | 推荐 `ws://127.0.0.1:3001`，不要暴露到公网 |
+| `napcat.token_env` | NapCat Token 环境变量名 | 只填写变量名，不要把 Token 写入配置 |
 
 最小可运行配置示例：
 
@@ -203,6 +208,8 @@ max_send_attempts = 3
 推荐优先使用 Web UI 添加监听会话和绑定 B 群，避免手动填写错误的群标识。`config.example.toml` 中包含图片缓存相关的完整可选配置。
 
 `group_name` 和 `group_names` 是旧配置兼容字段，新的配置和 Web UI 使用通用名称 `listener_names`。名称既可以是群名，也可以是联系人昵称。
+
+NapCat 模式不使用 `listener_names` 进行消息过滤，而是使用 `source.sessions` 中的稳定 ID：群消息比较 `group_id`，联系人消息比较 `user_id`。Web UI 的“消息来源”区域可以切换模式、保存 WebSocket 设置并增删会话。
 
 ## 首次使用流程
 
@@ -293,6 +300,35 @@ Web UI 当前提供：
 ```
 
 历史补发消息也会先进入 `pending`，需要启动真实发送模式后才会发送。Dry-run 下消息会保留在待发送队列，不会标记为已发送。
+
+## NapCat OneBot 模式
+
+NapCat 模式的链路是：
+
+```text
+NapCat + QQ NT → OneBot 11 WebSocket → 本项目 SQLite 队列 → QQ 官方机器人 → B 群
+```
+
+启用步骤：
+
+1. 在 Windows 安装并登录 NapCat，配置 OneBot 11 WebSocket 服务，监听 `127.0.0.1` 并设置 Token；
+2. 在 Web UI 的“消息来源”中选择“NapCat OneBot”，填写地址和 Token 环境变量名；
+3. 添加群号或 QQ 号，并填写便于识别的显示名称；
+4. 将 NapCat Token 设置为 Windows 当前用户环境变量（不要设置为系统环境变量），变量名为 `NAPCAT_ONEBOT_TOKEN`；
+5. 点击“运行前检查”，确认 NapCat WebSocket 和 QQ 登录检查通过；
+6. 先保持 Dry-run 运行，验证日志和队列，再停止服务并切换到真实发送。
+
+也可以使用只读 POC 验证事件质量：
+
+```powershell
+.\.venv\Scripts\python.exe -m app.napcat_poc --config config.toml
+```
+
+POC 只输出接收到的事件摘要，不调用 QQ 官方机器人发送接口。NapCat 模式使用 OneBot `message_id` 去重；图片收到后立即下载到 `data/image-cache`，下载失败会进入失败队列，不会发送 `[图片]` 占位文本。
+
+NapCat 属于非官方客户端扩展，账号可能面临掉线、验证或风控；不建议使用主 QQ 账号长期运行。NapCat 只负责监听，B 群发送仍由官方 QQ 机器人完成；不要把 OneBot WebSocket 或 Token 暴露到公网。
+
+NapCat Token 在 Windows 下只读取当前用户环境变量 `HKCU\\Environment`，不会读取同名的系统环境变量。可以在 PowerShell 中持久化设置：`[Environment]::SetEnvironmentVariable("NAPCAT_ONEBOT_TOKEN", "你的 NapCat Token", "User")`。修改后重启 Web 控制面和转发服务。
 
 ## 连续消息补读
 

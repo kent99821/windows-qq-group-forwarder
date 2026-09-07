@@ -95,6 +95,38 @@
       </div>
     </section>
 
+    <section class="panel source-config-panel">
+      <div class="panel-heading">
+        <div><p class="eyebrow">MESSAGE SOURCE</p><h2>消息来源</h2></div>
+        <span id="source-backend-badge" class="badge">Windows 通知</span>
+      </div>
+      <p class="muted">默认使用 Windows 通知。选择 NapCat 后，将通过本机 OneBot 11 WebSocket 按群号或 QQ 号接收消息。</p>
+      <div class="source-mode-row">
+        <label for="source-backend">监听方式</label>
+        <select id="source-backend">
+          <option value="windows_notification">Windows 通知</option>
+          <option value="napcat">NapCat OneBot</option>
+        </select>
+        <button id="save-source-backend">保存方式</button>
+      </div>
+      <div id="napcat-settings" hidden>
+        <div class="napcat-form">
+          <label>WebSocket 地址<input id="napcat-ws-url" type="text" placeholder="ws://127.0.0.1:3001"></label>
+          <label>Token 环境变量<input id="napcat-token-env" type="text" placeholder="NAPCAT_ONEBOT_TOKEN"></label>
+          <label class="inline-check"><input id="napcat-enabled" type="checkbox">启用 NapCat 消息源</label>
+          <button id="save-napcat" class="primary">保存 NapCat 配置</button>
+        </div>
+        <div class="panel-heading nested-heading"><h3>NapCat 监听会话</h3><span id="napcat-sessions-count" class="panel-meta">—</span></div>
+        <div id="napcat-sessions-list" class="listener-groups-list"><p class="muted">暂无会话</p></div>
+        <div class="session-add-form">
+          <select id="napcat-session-type" aria-label="会话类型"><option value="group">QQ群</option><option value="private">联系人</option></select>
+          <input id="napcat-session-id" type="text" inputmode="numeric" placeholder="群号或 QQ 号">
+          <input id="napcat-session-name" type="text" maxlength="120" placeholder="显示名称（可选）">
+          <button id="add-napcat-session" class="primary">添加</button>
+        </div>
+      </div>
+    </section>
+
     <section class="grid replay-grid">
       <div class="panel">
         <div class="panel-heading"><div><p class="eyebrow">RETRY</p><h2>重试发送失败消息</h2></div><span id="failed-count" class="panel-meta">—</span></div>
