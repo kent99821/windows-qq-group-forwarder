@@ -8,6 +8,27 @@ import tomllib
 
 
 @dataclass(frozen=True)
+class ListenerSession:
+    """A stable QQ conversation identifier used by the NapCat source."""
+
+    type: str
+    id: str
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        session_type = self.type.strip().casefold()
+        if session_type == "contact":
+            session_type = "private"
+        if session_type not in {"group", "private"}:
+            raise ValueError("监听会话 type 必须是 group 或 private")
+        if not self.id.strip():
+            raise ValueError("监听会话 id 不能为空")
+        object.__setattr__(self, "type", session_type)
+        object.__setattr__(self, "id", self.id.strip())
+        object.__setattr__(self, "name", self.name.strip() or self.id.strip())
+
+
+@dataclass(frozen=True)
 class SourceConfig:
     group_name: str
     app_name_contains: str
@@ -20,6 +41,8 @@ class SourceConfig:
     ui_image_wait_seconds: float = 8.0
     group_names: tuple[str, ...] = ()
     listener_names: tuple[str, ...] = ()
+    backend: str = "windows_notification"
+    sessions: tuple[ListenerSession, ...] = ()
 
     def __post_init__(self) -> None:
         # listener_names 是通用配置名；group_names/group_name 保留用于兼容旧配置。
@@ -29,6 +52,8 @@ class SourceConfig:
         ))
         if not names and self.group_name.strip():
             names = (self.group_name.strip(),)
+        if not names and self.sessions:
+            names = tuple(session.name for session in self.sessions)
         if not names:
             raise ValueError("至少需要配置一个监听会话名称")
         object.__setattr__(self, "listener_names", names)
@@ -53,10 +78,23 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class NapcatConfig:
+    enabled: bool = False
+    ws_url: str = "ws://127.0.0.1:3001"
+    token_env: str = "NAPCAT_ONEBOT_TOKEN"
+    connect_timeout_seconds: float = 10.0
+    heartbeat_timeout_seconds: float = 30.0
+    reconnect_min_seconds: float = 1.0
+    reconnect_max_seconds: float = 30.0
+    download_timeout_seconds: float = 20.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     source: SourceConfig
     destination: DestinationConfig
     runtime: RuntimeConfig
+    napcat: NapcatConfig = NapcatConfig()
 
 
 def _required(table: dict[str, object], key: str) -> str:
@@ -80,11 +118,17 @@ def load_config(path: Path) -> AppConfig:
     source = raw.get("source")
     destination = raw.get("destination")
     runtime = raw.get("runtime")
-    if not all(isinstance(item, dict) for item in (source, destination, runtime)):
-        raise ValueError("config.toml 必须包含 [source]、[destination]、[runtime]")
+    napcat = raw.get("napcat", {})
+    if not all(isinstance(item, dict) for item in (source, destination, runtime, napcat)):
+        raise ValueError("config.toml 必须包含 [source]、[destination]、[runtime]，NapCat 配置可选")
     assert isinstance(source, dict)
     assert isinstance(destination, dict)
     assert isinstance(runtime, dict)
+    assert isinstance(napcat, dict)
+
+    backend = str(source.get("backend", "windows_notification")).strip().casefold()
+    if backend not in {"windows_notification", "napcat"}:
+        raise ValueError("source.backend 必须是 windows_notification 或 napcat")
 
     interval = source.get("poll_interval_seconds", 0.2)
     attempts = runtime.get("max_send_attempts", 3)
@@ -97,12 +141,18 @@ def load_config(path: Path) -> AppConfig:
     names_raw = listener_names_raw if listener_names_raw is not None else legacy_group_names_raw
     names_key = "listener_names" if listener_names_raw is not None else "group_names"
     if names_raw is None:
-        listener_names = (_required(source, "group_name"),)
+        legacy_name = source.get("group_name")
+        if isinstance(legacy_name, str) and legacy_name.strip():
+            listener_names = (legacy_name.strip(),)
+        elif backend == "napcat":
+            listener_names = ()
+        else:
+            listener_names = (_required(source, "group_name"),)
     else:
         if not isinstance(names_raw, list) or not all(isinstance(item, str) for item in names_raw):
             raise ValueError(f"{names_key} 必须是字符串数组")
         listener_names = tuple(dict.fromkeys(item.strip() for item in names_raw if item.strip()))
-        if not listener_names:
+        if not listener_names and backend != "napcat":
             raise ValueError(f"{names_key} 至少需要包含一个监听会话名称")
     excludes = source.get("exclude_texts", [])
     if not isinstance(excludes, list) or not all(isinstance(item, str) for item in excludes):
@@ -123,6 +173,53 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(ui_image_wait_seconds, (int, float)) or ui_image_wait_seconds <= 0:
         raise ValueError("ui_image_wait_seconds 必须是正数")
 
+    sessions_raw = source.get("sessions", [])
+    if not isinstance(sessions_raw, list):
+        raise ValueError("source.sessions 必须是对象数组")
+    sessions: list[ListenerSession] = []
+    seen_sessions: set[tuple[str, str]] = set()
+    for index, item in enumerate(sessions_raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"source.sessions[{index}] 必须是对象")
+        session_type = item.get("type")
+        session_id = item.get("id")
+        session_name = item.get("name", "")
+        if not isinstance(session_type, str) or not session_type.strip():
+            raise ValueError(f"source.sessions[{index}].type 不能为空")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError(f"source.sessions[{index}].id 不能为空")
+        if not isinstance(session_name, str):
+            raise ValueError(f"source.sessions[{index}].name 必须是字符串")
+        session = ListenerSession(session_type, session_id, session_name)
+        identity = (session.type, session.id)
+        if identity in seen_sessions:
+            raise ValueError(f"source.sessions 中存在重复会话：{session.type}/{session.id}")
+        seen_sessions.add(identity)
+        sessions.append(session)
+
+    napcat_enabled = napcat.get("enabled", backend == "napcat")
+    if not isinstance(napcat_enabled, bool):
+        raise ValueError("napcat.enabled 必须是布尔值")
+    ws_url = str(napcat.get("ws_url", "ws://127.0.0.1:3001")).strip()
+    if not ws_url.startswith(("ws://", "wss://")):
+        raise ValueError("napcat.ws_url 必须以 ws:// 或 wss:// 开头")
+    token_env = _environment_name(napcat, "token_env") if "token_env" in napcat else "NAPCAT_ONEBOT_TOKEN"
+    napcat_numbers = {
+        "connect_timeout_seconds": (10.0, False),
+        "heartbeat_timeout_seconds": (30.0, False),
+        "reconnect_min_seconds": (1.0, False),
+        "reconnect_max_seconds": (30.0, False),
+        "download_timeout_seconds": (20.0, False),
+    }
+    napcat_values: dict[str, float] = {}
+    for key, (default, allow_zero) in napcat_numbers.items():
+        value = napcat.get(key, default)
+        if not isinstance(value, (int, float)) or (value < 0 if allow_zero else value <= 0):
+            raise ValueError(f"napcat.{key} 必须是正数")
+        napcat_values[key] = float(value)
+    if napcat_values["reconnect_max_seconds"] < napcat_values["reconnect_min_seconds"]:
+        raise ValueError("napcat.reconnect_max_seconds 不能小于 reconnect_min_seconds")
+
     base_dir = path.parent
     database_path = Path(str(runtime.get("database_path", "data/forwarder.sqlite3")))
     log_path = Path(str(runtime.get("log_path", "data/forwarder.log")))
@@ -139,7 +236,7 @@ def load_config(path: Path) -> AppConfig:
 
     return AppConfig(
         source=SourceConfig(
-            group_name=listener_names[0],
+            group_name=listener_names[0] if listener_names else (sessions[0].name if sessions else ""),
             app_name_contains=str(source.get("app_name_contains", "QQ")).strip(),
             poll_interval_seconds=float(interval),
             exclude_texts=tuple(item.strip() for item in excludes if item.strip()),
@@ -150,6 +247,8 @@ def load_config(path: Path) -> AppConfig:
             ui_image_wait_seconds=float(ui_image_wait_seconds),
             group_names=listener_names,
             listener_names=listener_names,
+            backend=backend,
+            sessions=tuple(sessions),
         ),
         destination=DestinationConfig(
             app_id=_required(destination, "app_id"),
@@ -162,6 +261,12 @@ def load_config(path: Path) -> AppConfig:
             log_path=log_path,
             dry_run=bool(runtime.get("dry_run", True)),
             max_send_attempts=attempts,
+        ),
+        napcat=NapcatConfig(
+            enabled=napcat_enabled,
+            ws_url=ws_url,
+            token_env=token_env,
+            **napcat_values,
         ),
     )
 
@@ -260,3 +365,98 @@ def save_listener_names(path: Path, listener_names: list[str] | tuple[str, ...])
 def save_listener_groups(path: Path, group_names: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     """Backward-compatible alias for callers using the old group-specific name."""
     return save_listener_names(path, group_names)
+
+
+def _replace_table_option(path: Path, table_name: str, option: str, value: str) -> None:
+    path = path.resolve()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    table_start = next((index for index, line in enumerate(lines) if line.strip() == table_name), None)
+    if table_start is None:
+        lines.append(f"\n{table_name}\n")
+        table_start = len(lines) - 1
+    table_end = next(
+        (index for index in range(table_start + 1, len(lines))
+         if lines[index].strip().startswith("[") and not lines[index].strip().startswith("[[") and lines[index].strip().endswith("]")),
+        len(lines),
+    )
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    pattern = re.compile(rf"^\s*{re.escape(option)}\s*=")
+    for index in range(table_start + 1, table_end):
+        if pattern.match(lines[index]):
+            lines[index] = f"{option} = {value}{newline}"
+            break
+    else:
+        lines.insert(table_start + 1, f"{option} = {value}{newline}")
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text("".join(lines), encoding="utf-8")
+    temp.replace(path)
+
+
+def save_source_backend(path: Path, backend: str) -> str:
+    normalized = backend.strip().casefold()
+    if normalized not in {"windows_notification", "napcat"}:
+        raise ValueError("消息源必须是 windows_notification 或 napcat")
+    _replace_table_option(path, "[source]", "backend", json.dumps(normalized))
+    return normalized
+
+
+def save_napcat_settings(
+    path: Path,
+    *,
+    enabled: bool,
+    ws_url: str,
+    token_env: str,
+) -> None:
+    if not isinstance(enabled, bool):
+        raise ValueError("napcat.enabled 必须是布尔值")
+    if not ws_url.strip().startswith(("ws://", "wss://")):
+        raise ValueError("NapCat 地址必须以 ws:// 或 wss:// 开头")
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", token_env.strip()):
+        raise ValueError("NapCat Token 必须填写环境变量名")
+    _replace_table_option(path, "[napcat]", "enabled", "true" if enabled else "false")
+    _replace_table_option(path, "[napcat]", "ws_url", json.dumps(ws_url.strip()))
+    _replace_table_option(path, "[napcat]", "token_env", json.dumps(token_env.strip()))
+
+
+def save_listener_sessions(path: Path, sessions: list[ListenerSession] | tuple[ListenerSession, ...]) -> tuple[ListenerSession, ...]:
+    normalized = tuple(sessions)
+    seen: set[tuple[str, str]] = set()
+    for session in normalized:
+        identity = (session.type, session.id)
+        if identity in seen:
+            raise ValueError(f"监听会话重复：{session.type}/{session.id}")
+        seen.add(identity)
+    path = path.resolve()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    source_start = next((index for index, line in enumerate(lines) if line.strip() == "[source]"), None)
+    if source_start is None:
+        raise ValueError("config.toml 中未找到 [source] 配置段")
+    source_end = next(
+        (index for index in range(source_start + 1, len(lines))
+         if lines[index].strip().startswith("[") and not lines[index].strip().startswith("[[") and lines[index].strip().endswith("]")),
+        len(lines),
+    )
+    body: list[str] = []
+    index = source_start + 1
+    while index < source_end:
+        if lines[index].strip() == "[[source.sessions]]":
+            index += 1
+            while index < source_end and not (lines[index].strip().startswith("[") and lines[index].strip().endswith("]")):
+                index += 1
+            continue
+        body.append(lines[index])
+        index += 1
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    for session in normalized:
+        body.extend([
+            f"[[source.sessions]]{newline}",
+            f"type = {json.dumps(session.type)}{newline}",
+            f"id = {json.dumps(session.id)}{newline}",
+            f"name = {json.dumps(session.name, ensure_ascii=False)}{newline}",
+            newline,
+        ])
+    updated = lines[:source_start + 1] + body + lines[source_end:]
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text("".join(updated), encoding="utf-8")
+    temp.replace(path)
+    return normalized
