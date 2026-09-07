@@ -1,6 +1,9 @@
+import asyncio
+import json
 from pathlib import Path
 
 import app.preflight as preflight
+from app.config import AppConfig, DestinationConfig, NapcatConfig, RuntimeConfig, SourceConfig, ListenerSession
 
 
 def write_config(path: Path, *, dry_run: bool) -> None:
@@ -84,3 +87,47 @@ def test_preflight_allows_missing_secret_in_dry_run(tmp_path: Path, monkeypatch:
 
     assert result["ready"] is True
     assert any(item["key"] == "client_secret" for item in result["warnings"])
+
+
+def test_napcat_login_check_ignores_heartbeat_before_target_response(monkeypatch: object, tmp_path: Path) -> None:
+    import websockets
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.messages = [
+                json.dumps({"post_type": "meta_event", "meta_event_type": "heartbeat"}),
+                json.dumps({
+                    "echo": "qq-forwarder-preflight",
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {"user_id": 10086, "nickname": "测试账号"},
+                }),
+            ]
+
+        async def send(self, value: str) -> None:
+            self.sent.append(value)
+
+        async def recv(self) -> str:
+            return self.messages.pop(0)
+
+        async def close(self) -> None:
+            pass
+
+    websocket = FakeWebSocket()
+
+    async def connect(_url: str, **_kwargs: object) -> FakeWebSocket:
+        return websocket
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    monkeypatch.setattr(preflight, "read_user_environment_variable", lambda _name: "test-token")
+    config = AppConfig(
+        SourceConfig("测试群", "QQ", 0.2, (), backend="napcat", sessions=(ListenerSession("group", "1", "测试群"),)),
+        DestinationConfig("app", "SECRET", "group", "[转发]"),
+        RuntimeConfig(tmp_path / "state.sqlite3", tmp_path / "forwarder.log", True, 1),
+        NapcatConfig(),
+    )
+
+    asyncio.run(preflight._check_napcat_connection(config))
+
+    assert json.loads(websocket.sent[0])["action"] == "get_login_info"

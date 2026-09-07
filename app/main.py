@@ -14,6 +14,7 @@ from .destination.qq_bot import OfficialQqBotSender
 from .models import IncomingMessage
 from .single_instance import SingleInstanceError, SingleInstanceLock
 from .source.windows_notification import WindowsNotificationReader
+from .source.napcat_onebot import NapcatOneBotSource
 from .source.qq_history_reader import QqHistoryReader
 from .source.qq_image_cache import QqImageCache
 from .source.qq_window_image import QqWindowImageReader
@@ -117,6 +118,15 @@ async def collect_notifications(
         await asyncio.to_thread(reader.wait_for_change, poll_interval_seconds)
 
 
+async def collect_napcat(
+    source: NapcatOneBotSource,
+    output: asyncio.Queue[list[IncomingMessage]],
+    stop_event: asyncio.Event,
+) -> None:
+    """Run the event-driven NapCat source until the service is stopped."""
+    await source.run(output, stop_event)
+
+
 def enqueue_message(store: StateStore, message: IncomingMessage) -> bool:
     logger = logging.getLogger(__name__)
     if is_low_value_message(message):
@@ -162,6 +172,13 @@ async def route_notification_batches(
             text_messages = [message for message in messages if message.kind != "toast_image_notice"]
             enqueued = False
             for message in text_messages:
+                if message.kind == "image" and not message.media_path:
+                    if store.enqueue_failed(message, "NapCat 图片原图未取得，禁止发送占位消息"):
+                        logging.getLogger(__name__).error(
+                            "NapCat 图片消息已记录为失败，不会发送占位提示 key=%s source_group=%s",
+                            message.message_key[:12], message.source_group,
+                        )
+                    continue
                 enqueued = enqueue_message(store, message) or enqueued
             if enqueued:
                 send_signal.set()
@@ -278,10 +295,22 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
         discarded = store.discard_legacy_pending()
         if discarded:
             logging.getLogger(__name__).warning("已废弃 %d 条旧窗口扫描待发送记录，不会发送到 QQ 群", discarded)
-        reader = WindowsNotificationReader(config.source)
-        history_reader = QqHistoryReader(config.source)
-        image_cache = QqImageCache(config.source)
-        window_image_reader = QqWindowImageReader(config.source)
+        napcat_source: NapcatOneBotSource | None = None
+        reader: WindowsNotificationReader | None = None
+        history_reader: QqHistoryReader | None = None
+        image_cache: QqImageCache | None = None
+        window_image_reader: QqWindowImageReader | None = None
+        if config.source.backend == "napcat":
+            napcat_source = NapcatOneBotSource(
+                config.source,
+                config.napcat,
+                config.runtime.database_path.parent / "image-cache",
+            )
+        else:
+            reader = WindowsNotificationReader(config.source)
+            history_reader = QqHistoryReader(config.source)
+            image_cache = QqImageCache(config.source)
+            window_image_reader = QqWindowImageReader(config.source)
         sender: OfficialQqBotSender | None = None
         gateway_stop = asyncio.Event()
         gateway_task: asyncio.Task[None] | None = None
@@ -290,25 +319,36 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
         send_signal = asyncio.Event()
         worker_tasks: list[asyncio.Task[None]] = []
         try:
-            reader.prime()
-            image_cache.prime()
+            if reader is not None and image_cache is not None:
+                reader.prime()
+                image_cache.prime()
             gateway_task = asyncio.create_task(run_gateway_forever(config.destination, gateway_stop))
             if not config.runtime.dry_run:
                 sender = OfficialQqBotSender(config.destination)
                 await sender.start()
-            await asyncio.to_thread(history_reader.prime)
+            if history_reader is not None:
+                await asyncio.to_thread(history_reader.prime)
             logger.info(
-                "Windows QQ 转发器已启动 source_names=%s notification_backend=%s dry_run=%s",
+                "QQ 转发器已启动 source_backend=%s source_names=%s notification_backend=%s dry_run=%s",
+                config.source.backend,
                 ",".join(config.source.listener_names),
-                reader.backend_name,
+                reader.backend_name if reader is not None else "napcat-onebot-websocket",
                 config.runtime.dry_run,
             )
             send_signal.set()
-            worker_tasks = [
+            source_stop = asyncio.Event()
+            source_task = (
                 asyncio.create_task(
-                    collect_notifications(reader, notification_queue, config.source.poll_interval_seconds),
+                    collect_napcat(napcat_source, notification_queue, source_stop),
+                    name="napcat-onebot-source",
+                )
+                if napcat_source is not None
+                else asyncio.create_task(
+                    collect_notifications(reader, notification_queue, config.source.poll_interval_seconds),  # type: ignore[arg-type]
                     name="qq-notification-collector",
-                ),
+                )
+            )
+            worker_tasks = [source_task,
                 asyncio.create_task(
                     route_notification_batches(
                         notification_queue,
@@ -320,28 +360,37 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                     name="qq-notification-router",
                 ),
                 asyncio.create_task(
-                    process_image_batches(
-                        config,
-                        image_queue,
-                        image_cache,
-                        window_image_reader,
-                        store,
-                        send_signal,
-                    ),
-                    name="qq-image-processor",
-                ),
-                asyncio.create_task(
                     send_pending_forever(config, store, sender, send_signal),
                     name="qq-message-sender",
                 ),
             ]
+            if reader is not None and image_cache is not None and window_image_reader is not None:
+                worker_tasks.insert(
+                    2,
+                    asyncio.create_task(
+                        process_image_batches(
+                            config,
+                            image_queue,
+                            image_cache,
+                            window_image_reader,
+                            store,
+                            send_signal,
+                        ),
+                        name="qq-image-processor",
+                    ),
+                )
             await asyncio.gather(*worker_tasks)
         finally:
+            if 'source_stop' in locals():
+                source_stop.set()
             for task in worker_tasks:
                 task.cancel()
             if worker_tasks:
                 await asyncio.gather(*worker_tasks, return_exceptions=True)
-            reader.close()
+            if reader is not None:
+                reader.close()
+            if napcat_source is not None:
+                await napcat_source.close()
             gateway_stop.set()
             if gateway_task is not None:
                 try:

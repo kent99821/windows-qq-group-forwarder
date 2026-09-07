@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import AppConfig, load_config
 from .destination.qq_bot import OfficialQqBotSender
+from .environment import read_user_environment_variable
 from .source.qq_image_cache import QqImageCache
 from .source.qq_window_image import QqWindowImageReader
 from .source.windows_notification import WindowsNotificationReader
@@ -52,6 +55,52 @@ async def _check_bot_credentials(config: AppConfig) -> None:
         await sender.close()
 
 
+async def _check_napcat_connection(config: AppConfig) -> None:
+    """Perform a read-only OneBot login check; never sends a QQ message."""
+    try:
+        import websockets
+    except ImportError as exc:
+        raise RuntimeError("缺少 websockets 依赖") from exc
+    token = read_user_environment_variable(config.napcat.token_env)
+    headers = {"Authorization": f"Bearer {token}"}
+    kwargs = {
+        "open_timeout": config.napcat.connect_timeout_seconds,
+        "ping_interval": 20,
+        "ping_timeout": config.napcat.heartbeat_timeout_seconds,
+    }
+    try:
+        try:
+            websocket = await websockets.connect(config.napcat.ws_url, additional_headers=headers, **kwargs)
+        except TypeError as exc:
+            if "additional_headers" not in str(exc):
+                raise
+            websocket = await websockets.connect(config.napcat.ws_url, extra_headers=headers, **kwargs)
+        try:
+            await websocket.send('{"action":"get_login_info","params":{},"echo":"qq-forwarder-preflight"}')
+            deadline = asyncio.get_running_loop().time() + config.napcat.heartbeat_timeout_seconds
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise RuntimeError("等待 get_login_info 响应超时")
+                raw = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+                try:
+                    response = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(response, dict):
+                    continue
+                if response.get("echo") != "qq-forwarder-preflight":
+                    # 心跳、生命周期事件和其他未关联响应不能作为登录检查结果。
+                    continue
+                if response.get("status") != "ok" or response.get("retcode") not in {0, None} or not isinstance(response.get("data"), dict):
+                    raise RuntimeError("NapCat get_login_info 未返回有效登录信息")
+                break
+        finally:
+            await websocket.close()
+    except Exception as exc:
+        raise RuntimeError(f"NapCat WebSocket 或登录检查失败：{type(exc).__name__}") from exc
+
+
 def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str, Any]:
     """Check everything required by the Windows forwarder without sending a message."""
     report: dict[str, list[dict[str, str]]] = {"passed": [], "missing": [], "warnings": []}
@@ -68,14 +117,26 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
         return {**report, "ready": False}
     _append(report, "passed", "config_parse", "配置内容", "配置格式正确")
 
-    if config.source.listener_names:
-        _append(
-            report,
-            "passed",
-            "listeners",
-            "监听会话",
-            f"已配置 {len(config.source.listener_names)} 个群或联系人",
-        )
+    if config.source.backend == "napcat":
+        if not config.napcat.enabled:
+            _append(report, "missing", "napcat_enabled", "NapCat 消息源", "source.backend 已选择 napcat，但 napcat.enabled 未开启")
+        else:
+            _append(report, "passed", "napcat_enabled", "NapCat 消息源", "NapCat OneBot 消息源已启用")
+        if config.source.sessions:
+            _append(report, "passed", "listeners", "监听会话", f"已配置 {len(config.source.sessions)} 个带 ID 的群或联系人")
+        else:
+            _append(report, "missing", "listeners", "监听会话", "NapCat 模式必须至少配置一个 source.sessions 会话 ID")
+        parsed_url = urlparse(config.napcat.ws_url)
+        if parsed_url.hostname in {"127.0.0.1", "localhost", "::1"}:
+            _append(report, "passed", "napcat_url", "NapCat WebSocket 地址", config.napcat.ws_url)
+        else:
+            _append(report, "warnings", "napcat_url", "NapCat WebSocket 地址", "地址不是本机回环地址，请确认未暴露到公网")
+        if read_user_environment_variable(config.napcat.token_env):
+            _append(report, "passed", "napcat_token", "NapCat Token", f"已读取当前用户环境变量 {config.napcat.token_env}")
+        else:
+            _append(report, "missing", "napcat_token", "NapCat Token", f"未设置当前用户环境变量 {config.napcat.token_env}")
+    elif config.source.listener_names:
+        _append(report, "passed", "listeners", "监听会话", f"已配置 {len(config.source.listener_names)} 个群或联系人")
     else:
         _append(report, "missing", "listeners", "监听会话", "至少添加一个 QQ 群或联系人")
 
@@ -129,7 +190,11 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
         _append(report, "missing", "windows", "Windows 环境", "此项目只能在 Windows 中运行")
 
     missing_dependencies: list[str] = []
-    required_modules = ["httpx", "pywinauto", "PIL"]
+    required_modules = ["httpx", "PIL"]
+    if config.source.backend == "windows_notification":
+        required_modules.append("pywinauto")
+    else:
+        required_modules.append("websockets")
     if not config.runtime.dry_run:
         required_modules.append("qqbot_agent_sdk")
     for module_name in required_modules:
@@ -161,7 +226,7 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
     except Exception as exc:
         _append(report, "missing", "storage", "数据与日志目录", f"无法写入：{exc}")
 
-    if os.name == "nt":
+    if os.name == "nt" and config.source.backend == "windows_notification":
         try:
             qq_window = QqWindowImageReader(config.source)._qq_window()
             if qq_window is None:
@@ -206,6 +271,15 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
                 _append(report, "warnings", "image_cache", "QQ 图片缓存", "未找到缓存目录；文本仍可转发，图片可能只能发送占位提示")
         except Exception as exc:
             _append(report, "warnings", "image_cache", "QQ 图片缓存", f"检查失败：{exc}")
+
+    if config.source.backend == "napcat" and verify_remote and read_user_environment_variable(config.napcat.token_env):
+        try:
+            asyncio.run(_check_napcat_connection(config))
+            _append(report, "passed", "napcat_connection", "NapCat 连接与登录", "WebSocket 可连接，QQ 登录信息读取成功")
+        except Exception as exc:
+            _append(report, "missing", "napcat_connection", "NapCat 连接与登录", str(exc))
+    elif config.source.backend == "napcat" and not verify_remote:
+        _append(report, "warnings", "napcat_connection", "NapCat 连接与登录", "本次未执行联网验证")
 
     can_verify_bot = bool(secret and app_id_valid)
     if verify_remote and can_verify_bot:
