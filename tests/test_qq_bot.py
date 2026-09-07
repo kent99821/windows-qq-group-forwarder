@@ -1,6 +1,10 @@
+import asyncio
 from datetime import datetime, timezone
 
-from app.destination.qq_bot import format_forward_content
+import pytest
+
+from app.config import DestinationConfig
+from app.destination.qq_bot import OfficialQqBotSender, format_forward_content
 from app.models import IncomingMessage
 
 
@@ -32,3 +36,17 @@ def test_image_placeholder_includes_time_and_suffix() -> None:
 
     assert result.startswith("[A群转发] [")
     assert "] 小明：[图片]（Windows 通知仅提供图片占位符，无法取得原图）" in result
+
+
+def test_sender_refuses_to_send_image_placeholder_as_text() -> None:
+    sender = OfficialQqBotSender(DestinationConfig("app", "SECRET", "group", "[转发]"))
+    sender.api = object()
+    message = IncomingMessage.create(
+        "missing-image",
+        "A 群",
+        "小明：[图片]",
+        kind="toast_image_notice",
+    )
+
+    with pytest.raises(RuntimeError, match="图片原图未取得"):
+        asyncio.run(sender.send(message))

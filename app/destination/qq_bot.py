@@ -54,6 +54,10 @@ class OfficialQqBotSender:
             self.http_client = None
 
     async def send(self, message: IncomingMessage) -> None:
+        if message.kind == "toast_image_notice":
+            raise RuntimeError("图片原图未取得，禁止将 [图片] 占位提示发送到 QQ 群")
+        if message.kind == "image" and not message.media_path:
+            raise RuntimeError("图片消息缺少可发送的原图文件")
         if self.api is None:
             raise RuntimeError("QQ 机器人发送器尚未启动")
         if message.kind == "image" and message.media_path:

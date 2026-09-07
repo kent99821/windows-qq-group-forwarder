@@ -3,8 +3,13 @@ from collections import deque
 from pathlib import Path
 import threading
 
-from app.config import SourceConfig
-from app.main import collect_notifications, is_low_value_message, route_notification_batches
+from app.config import AppConfig, DestinationConfig, RuntimeConfig, SourceConfig
+from app.main import (
+    collect_notifications,
+    is_low_value_message,
+    process_image_batches,
+    route_notification_batches,
+)
 from app.models import IncomingMessage
 from app.source.windows_notification import _UserNotificationListenerBackend
 from app.state_store import StateStore
@@ -125,3 +130,58 @@ def test_router_does_not_enqueue_all_members_only_message(tmp_path: Path) -> Non
             store.close()
 
     assert asyncio.run(scenario()) == ["元来！：正常消息"]
+
+
+def test_missing_image_is_recorded_as_failed_and_not_sent(tmp_path: Path) -> None:
+    class MissingWindowImageReader:
+        def capture_many(
+            self,
+            message_keys: list[str],
+            _directory: Path,
+            _group_name: str,
+        ) -> list[None]:
+            return [None for _ in message_keys]
+
+    class MissingImageCache:
+        def find_for_notification(self) -> None:
+            return None
+
+    async def scenario() -> tuple[int, int, str, bool]:
+        config = AppConfig(
+            source=SourceConfig("发家致富", "QQ", 0.2, ()),
+            destination=DestinationConfig("app", "SECRET", "group", "[转发]"),
+            runtime=RuntimeConfig(tmp_path / "state.sqlite3", tmp_path / "forwarder.log", False, 3),
+        )
+        store = StateStore(config.runtime.database_path)
+        image_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
+        send_signal = asyncio.Event()
+        task = asyncio.create_task(process_image_batches(
+            config,
+            image_queue,
+            MissingImageCache(),  # type: ignore[arg-type]
+            MissingWindowImageReader(),  # type: ignore[arg-type]
+            store,
+            send_signal,
+        ))
+        try:
+            await image_queue.put([
+                IncomingMessage.create(
+                    "missing-image",
+                    "发家致富",
+                    "小明：[图片]",
+                    kind="toast_image_notice",
+                )
+            ])
+            await asyncio.wait_for(image_queue.join(), timeout=1)
+            failed = store.failed()[0]
+            return store.count("pending"), store.count("failed"), str(failed["last_error"]), send_signal.is_set()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            store.close()
+
+    pending, failed, error, signalled = asyncio.run(scenario())
+    assert pending == 0
+    assert failed == 1
+    assert "图片原图未取得" in error
+    assert signalled is False

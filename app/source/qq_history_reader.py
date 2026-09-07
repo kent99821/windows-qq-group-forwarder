@@ -195,9 +195,12 @@ def parse_history_nodes(
 
 
 def _sender_and_content(sender: str | None, content: str) -> tuple[str, str]:
-    normalized_content = NOTIFICATION_BADGE_PATTERN.sub("", _normal(content), count=1)
+    normalized_content = _normal(content)
     if sender:
         return _normal(sender).casefold(), normalized_content.casefold()
+    # Windows 通知可能以 ``[特别关心] 发送人：正文`` 开头；聊天记录已经
+    # 单独解析出 sender，此时 ``[图片]`` 是正文，不能当成通知标签删除。
+    normalized_content = NOTIFICATION_BADGE_PATTERN.sub("", normalized_content, count=1)
     matched = SENDER_PATTERN.match(normalized_content)
     if matched:
         return _normal(matched.group(1)).casefold(), _normal(matched.group(2)).casefold()

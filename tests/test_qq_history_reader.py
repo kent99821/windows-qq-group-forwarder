@@ -205,6 +205,31 @@ def test_special_care_prefix_does_not_duplicate_backfilled_message() -> None:
     assert [(message.sender, message.content) for message in merged] == [("家欣", "在吗")]
 
 
+def test_image_placeholder_is_not_mistaken_for_notification_badge() -> None:
+    notification = IncomingMessage.create(
+        "toast-image",
+        "发家致富",
+        "元子小助理：[图片]",
+        kind="toast_image_notice",
+    )
+    visible = [
+        HistoryRecord(
+            "发家致富",
+            "元子小助理",
+            "[图片]",
+            "23:40",
+            "toast_image_notice",
+            1,
+        )
+    ]
+
+    merged = merge_notifications_with_history([notification], visible, visible)
+
+    assert [(message.sender, message.content) for message in merged] == [
+        ("元子小助理", "[图片]")
+    ]
+
+
 def test_notification_is_used_when_history_read_fails() -> None:
     notification = IncomingMessage.create("toast-only", "发家致富", "家欣：在吗")
 

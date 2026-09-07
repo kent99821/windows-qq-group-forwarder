@@ -225,7 +225,19 @@ async def process_image_batches(
                             message = replace(message, kind="image", media_path=str(staged_image))
                             logger.info("图片消息已通过 QQ 缓存取得原图并加入发送队列 path=%s", staged_image)
                     else:
-                        logger.warning("图片原图未取得，加入 [图片] 占位提示队列")
+                        logger.warning("图片原图未取得，禁止发送 [图片] 占位提示")
+                if message.kind == "toast_image_notice" or not message.media_path:
+                    error = "图片原图未取得：QQ 聊天窗口复制和缓存目录匹配均失败"
+                    if store.enqueue_failed(message, error):
+                        logger.error(
+                            "图片消息已记录为失败，不会转发占位提示 key=%s source_group=%s content=%s",
+                            message.message_key[:12],
+                            message.source_group,
+                            message.content,
+                        )
+                    else:
+                        logger.debug("忽略重复的失败图片消息 key=%s", message.message_key[:12])
+                    continue
                 enqueued = enqueue_message(store, message) or enqueued
             if enqueued:
                 send_signal.set()

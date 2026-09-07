@@ -54,3 +54,21 @@ def test_failed_messages_can_be_selected_for_retry(tmp_path: Path) -> None:
         assert retried["last_error"] is None
     finally:
         store.close()
+
+
+def test_message_can_be_recorded_as_failed_without_entering_pending_queue(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    try:
+        message = IncomingMessage.create(
+            "missing-image",
+            "A 群",
+            "小明：[图片]",
+            kind="toast_image_notice",
+        )
+
+        assert store.enqueue_failed(message, "图片原图未取得") is True
+        assert store.count("pending") == 0
+        assert store.count("failed") == 1
+        assert store.failed()[0]["last_error"] == "图片原图未取得"
+    finally:
+        store.close()

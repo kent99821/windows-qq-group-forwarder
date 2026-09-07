@@ -52,6 +52,28 @@ class StateStore:
         self.connection.commit()
         return cursor.rowcount == 1
 
+    def enqueue_failed(self, message: IncomingMessage, error: str) -> bool:
+        """Persist an unsendable message directly in the failed queue."""
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO messages
+            (message_key, source_group, sender, kind, content, media_path, status, observed_at, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, ?)
+            """,
+            (
+                message.message_key,
+                message.source_group,
+                message.sender,
+                message.kind,
+                message.content,
+                message.media_path,
+                message.observed_at,
+                error[:1000],
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
     def pending(self, limit: int = 20) -> list[sqlite3.Row]:
         return list(self.connection.execute(
             "SELECT * FROM messages WHERE status = 'pending' ORDER BY rowid LIMIT ?", (limit,)
