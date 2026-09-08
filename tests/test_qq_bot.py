@@ -17,10 +17,10 @@ def test_forward_content_includes_local_display_time() -> None:
         observed_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc).isoformat(),
     )
 
-    result = format_forward_content("[A群转发]", message)
+    result = format_forward_content("[固定前缀]", message)
 
     local_time = datetime.fromisoformat(message.observed_at).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    assert result == f"[A群转发] [{local_time}] 小明: 你好"
+    assert result == f"[A 群] [{local_time}] 小明: 你好"
 
 
 def test_image_placeholder_includes_time_and_suffix() -> None:
@@ -32,10 +32,23 @@ def test_image_placeholder_includes_time_and_suffix() -> None:
         observed_at="invalid",
     )
 
-    result = format_forward_content("[A群转发]", message)
+    result = format_forward_content("[固定前缀]", message)
 
-    assert result.startswith("[A群转发] [")
+    assert result.startswith("[A 群] [")
     assert "] 小明：[图片]（Windows 通知仅提供图片占位符，无法取得原图）" in result
+
+
+def test_forward_content_uses_fallback_when_source_name_is_empty() -> None:
+    message = IncomingMessage(
+        message_key="key",
+        source_group="",
+        content="你好",
+        observed_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc).isoformat(),
+    )
+
+    result = format_forward_content("[固定前缀]", message)
+
+    assert result.startswith("[固定前缀] [")
 
 
 def test_sender_refuses_to_send_image_placeholder_as_text() -> None:

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from app.source.qq_history_reader import HistoryRecord
@@ -78,3 +79,30 @@ def test_add_destination_persists_new_bot(tmp_path: Path) -> None:
 
     assert result == {"destinations": ["app", "bot-2"]}
     assert [item.bot_id for item in controller.config().destinations] == ["app", "bot-2"]
+
+
+def test_manual_test_message_uses_system_source(monkeypatch: object, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    captured: list[object] = []
+
+    class FakeSender:
+        def __init__(self, _destination: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            pass
+
+        async def send(self, message: object) -> None:
+            captured.append(message)
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.web.OfficialQqBotSender", FakeSender)
+    controller = ForwarderController(config_path)
+
+    asyncio.run(controller._send_test_message(controller.config().destination))
+
+    assert len(captured) == 1
+    assert captured[0].source_group == "系统消息"

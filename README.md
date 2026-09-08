@@ -177,7 +177,7 @@ group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配
 | `destinations[].app_id` | QQ 官方机器人的 AppID | 不要填写机器人名称 |
 | `destinations[].client_secret_env` | 保存密钥的环境变量名 | 只填写变量名，不要填写密钥本身 |
 | `destinations[].group_openid` | 该机器人目标群标识 | 可在 Web UI 选择机器人后绑定 |
-| `destinations[].message_prefix` | 该机器人消息前缀 | 可为不同目标群设置不同前缀 |
+| `destinations[].message_prefix` | 旧版消息前缀兼容字段 | 正常转发自动使用监听到的群名/联系人昵称；主动测试使用“系统消息” |
 | `runtime.database_path` | SQLite 队列位置 | 建议保留在项目的 `data/` 目录 |
 | `runtime.log_path` | 日志位置 | 日志包含消息正文，应妥善保护 |
 | `runtime.dry_run` | 是否只监听不发送 | 运行中锁定，修改前需停止服务 |

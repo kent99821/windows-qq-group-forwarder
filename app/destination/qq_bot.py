@@ -10,12 +10,17 @@ from ..environment import read_user_environment_variable
 from ..models import IncomingMessage
 
 
-def format_forward_content(prefix: str, message: IncomingMessage) -> str:
-    """Format text forwarded to B group, including the local observed time."""
+def format_forward_content(fallback_prefix: str, message: IncomingMessage) -> str:
+    """Format text with the actual source session as the visible prefix."""
     timestamp = _format_local_time(message.observed_at)
     sender = f"{message.sender}: " if message.sender else ""
     suffix = "（Windows 通知仅提供图片占位符，无法取得原图）" if message.kind == "toast_image_notice" else ""
-    return f"{prefix} [{timestamp}] {sender}{message.content}{suffix}".strip()
+    source_name = message.source_group.strip() or fallback_prefix.strip()
+    if source_name.startswith("[") and source_name.endswith("]"):
+        source_prefix = source_name
+    else:
+        source_prefix = f"[{source_name}]"
+    return f"{source_prefix} [{timestamp}] {sender}{message.content}{suffix}".strip()
 
 
 def _format_local_time(value: str) -> str:

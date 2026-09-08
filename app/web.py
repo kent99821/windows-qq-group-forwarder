@@ -415,7 +415,7 @@ class ForwarderController:
             await sender.start()
             await sender.send(IncomingMessage.create(
                 f"manual-test:{time.time_ns()}",
-                "主动消息测试",
+                "系统消息",
                 "QQ 主动消息测试成功。后续监听到的新消息将由本机自动转发。",
             ))
         finally:
