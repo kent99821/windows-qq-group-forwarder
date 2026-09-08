@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import os
 from typing import Any
 
 import httpx
 
 from ..config import DestinationConfig
+from ..environment import read_user_environment_variable
 from ..models import IncomingMessage
 
 
@@ -36,7 +36,7 @@ class OfficialQqBotSender:
         self.api: Any = None
 
     async def start(self) -> None:
-        secret = os.environ.get(self.config.client_secret_env)
+        secret = read_user_environment_variable(self.config.client_secret_env)
         if not secret:
             raise RuntimeError(f"环境变量 {self.config.client_secret_env} 未设置")
         try:

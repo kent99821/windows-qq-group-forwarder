@@ -4,14 +4,17 @@ import os
 
 
 def read_user_environment_variable(name: str) -> str | None:
-    """Read a persisted user-scoped environment variable.
+    """Read a credential from the process environment, then the current user.
 
-    ``os.environ`` is the merged process environment on Windows, so it cannot
-    distinguish HKCU values from HKLM values. NapCat credentials must not
-    silently come from the machine-wide environment; query HKCU directly.
+    PowerShell's ``$env:NAME`` is process-scoped and is intentionally checked
+    first. If it is absent, read the persisted current-user value from HKCU.
+    No separate machine-wide lookup is performed here.
     """
+    process_value = os.environ.get(name)
+    if isinstance(process_value, str) and process_value.strip():
+        return process_value.strip()
     if os.name != "nt":
-        return os.environ.get(name)
+        return None
     try:
         import winreg
 

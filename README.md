@@ -1,23 +1,23 @@
 # Windows QQ 消息转发器
 
-这是一个独立的 Windows 项目，用于监听 QQ 群或联系人消息，并将文本和可取得的图片转发到 B 群的 QQ 官方机器人。
+这是一个独立的 Windows 项目，用于监听 QQ 群或联系人消息，并将文本和可取得的图片转发到一个或多个 B 群的 QQ 官方机器人。
 
 本项目面向“个人 QQ 在 A 群/联系人中接收消息，官方 QQ 机器人在 B 群中转发消息”的场景。它不需要把机器人加入 A 群。默认使用 Windows 通知；如果已安装并配置 NapCat，也可以使用 OneBot 11 WebSocket 直接接收消息，减少通知覆盖造成的漏消息。
 
-当前版本定位为“单实例、单目标机器人”。单实例多机器人、多实例管理和资源评估已整理到[未来优化方向](docs/future-optimization-plan.md)，后续版本开发前应先参考该文档。
+当前版本定位为“单实例、多目标机器人”。一个实例可以监听一组 QQ 会话，并把同一条消息分别转发给多个官方机器人；多实例管理和资源评估仍整理在[未来优化方向](docs/future-optimization-plan.md)中。
 
 ## 快速开始
 
 1. 在 Windows 中登录 QQ，确保监听群或联系人能够产生通知。
 2. 创建 Python 虚拟环境并安装依赖。
 3. 复制 `config.example.toml` 为 `config.toml`，填写监听会话、机器人 AppID 和 B 群绑定信息。
-4. 在启动 Web 控制面的同一个 PowerShell 窗口中设置 `QQ_BOT_CLIENT_SECRET`。
+4. 在 Windows“用户环境变量”中设置 `QQ_BOT_CLIENT_SECRET`，或在启动 Web 控制面的 PowerShell 中临时设置 `$env:QQ_BOT_CLIENT_SECRET`。
 5. 启动 Web UI，依次执行“运行前检查”→“绑定 B 群”→“发送主动测试”→关闭 Dry-run 后启动转发。
 
 默认 Web 地址：<http://127.0.0.1:8765/>
 
 > [!IMPORTANT]
-> `QQ_BOT_CLIENT_SECRET` 必须设置在启动 Web 控制面的同一个 PowerShell 进程中。已经打开的 Web 控制面不会自动读取后来新增的用户环境变量，修改环境变量后需要重启 Web 控制面。
+> 项目读取密钥的顺序是：当前 PowerShell 进程环境变量（`$env:NAME`）→当前 Windows 用户环境变量（HKCU）。代码不会单独读取系统环境变量（HKLM）。设置 `$env:` 后，需要从该 PowerShell 启动 Web 控制面；设置用户变量后，重新执行绑定或运行前检查即可。
 
 ## 目录
 
@@ -173,9 +173,11 @@ group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配
 | `source.image_cache_settle_seconds` | 图片文件稳定等待时间 | 文件写入完成前的等待时间 |
 | `source.image_cache_wait_seconds` | 等待图片缓存时间 | 收到图片通知后最多扫描多久 |
 | `source.ui_image_wait_seconds` | QQ 窗口复制图片超时 | UI 自动复制图片的最长等待时间 |
-| `destination.app_id` | QQ 官方机器人的 AppID | 不要填写机器人名称 |
-| `destination.client_secret_env` | 保存密钥的环境变量名 | 只填写变量名，不要填写密钥本身 |
-| `destination.group_openid` | B 群标识 | 通过 Web UI 绑定或手动填写 |
+| `destinations[].bot_id` | 机器人唯一标识 | 同一实例内不能重复；建议使用 `bot-1`、`bot-2` |
+| `destinations[].app_id` | QQ 官方机器人的 AppID | 不要填写机器人名称 |
+| `destinations[].client_secret_env` | 保存密钥的环境变量名 | 只填写变量名，不要填写密钥本身 |
+| `destinations[].group_openid` | 该机器人目标群标识 | 可在 Web UI 选择机器人后绑定 |
+| `destinations[].message_prefix` | 该机器人消息前缀 | 可为不同目标群设置不同前缀 |
 | `runtime.database_path` | SQLite 队列位置 | 建议保留在项目的 `data/` 目录 |
 | `runtime.log_path` | 日志位置 | 日志包含消息正文，应妥善保护 |
 | `runtime.dry_run` | 是否只监听不发送 | 运行中锁定，修改前需停止服务 |
@@ -192,11 +194,20 @@ app_name_contains = "QQ"
 poll_interval_seconds = 0.2
 exclude_texts = []
 
-[destination]
+[[destinations]]
+bot_id = "bot-1"
 app_id = "你的机器人 AppID"
 client_secret_env = "QQ_BOT_CLIENT_SECRET"
 group_openid = "你的 B 群 group_openid"
 message_prefix = "[A群转发]"
+
+# 第二个机器人会收到同一批消息，并转发到它自己的目标群。
+# [[destinations]]
+# bot_id = "bot-2"
+# app_id = "第二个机器人 AppID"
+# client_secret_env = "QQ_BOT_2_CLIENT_SECRET"
+# group_openid = "第二个目标群 group_openid"
+# message_prefix = "[A群转发]"
 
 [runtime]
 database_path = "data/forwarder.sqlite3"
@@ -205,7 +216,13 @@ dry_run = true
 max_send_attempts = 3
 ```
 
-推荐优先使用 Web UI 添加监听会话和绑定 B 群，避免手动填写错误的群标识。`config.example.toml` 中包含图片缓存相关的完整可选配置。
+推荐优先使用 Web UI 添加监听会话、添加机器人并绑定各自的目标群，避免手动填写错误的群标识。`config.example.toml` 中包含图片缓存相关的完整可选配置。
+
+### 单实例多机器人
+
+在 Web UI 的“绑定 QQ 群”区域，可以为当前实例添加多个机器人。每个机器人需要填写唯一 `bot_id`、AppID、密钥环境变量名和目标群；添加后选择对应机器人，点击“绑定所选 QQ 群”。
+
+转发服务收到一条消息后，会为每个机器人创建独立投递任务。一个机器人发送成功而另一个失败时，消息会显示为失败，但重试只会再次发送失败的机器人，已成功的机器人不会收到重复消息。图片文件会等所有机器人发送成功后再清理。
 
 `group_name` 和 `group_names` 是旧配置兼容字段，新的配置和 Web UI 使用通用名称 `listener_names`。名称既可以是群名，也可以是联系人昵称。
 
@@ -328,7 +345,7 @@ POC 只输出接收到的事件摘要，不调用 QQ 官方机器人发送接口
 
 NapCat 属于非官方客户端扩展，账号可能面临掉线、验证或风控；不建议使用主 QQ 账号长期运行。NapCat 只负责监听，B 群发送仍由官方 QQ 机器人完成；不要把 OneBot WebSocket 或 Token 暴露到公网。
 
-NapCat Token 在 Windows 下只读取当前用户环境变量 `HKCU\\Environment`，不会读取同名的系统环境变量。可以在 PowerShell 中持久化设置：`[Environment]::SetEnvironmentVariable("NAPCAT_ONEBOT_TOKEN", "你的 NapCat Token", "User")`。修改后重启 Web 控制面和转发服务。
+NapCat Token 和 QQ 机器人密钥按“当前进程环境变量 → 当前用户环境变量 `HKCU\\Environment`”顺序读取，不会单独读取系统环境变量。可以在 PowerShell 中持久化设置：`[Environment]::SetEnvironmentVariable("NAPCAT_ONEBOT_TOKEN", "你的 NapCat Token", "User")`。设置 `$env:` 临时变量后，应从同一个 PowerShell 启动服务；设置用户变量后，重新执行检查或绑定即可。
 
 ## 连续消息补读
 
@@ -401,13 +418,13 @@ image_cache_wait_seconds = 45.0
 
 ### 页面提示未读取机器人密钥
 
-确认密钥是在启动 Web 控制面的同一个 PowerShell 窗口中设置的：
+确认当前 PowerShell 进程中是否设置了密钥（只输出是否存在，不显示密钥内容）：
 
 ```powershell
-echo $env:QQ_BOT_CLIENT_SECRET
+if ([string]::IsNullOrWhiteSpace($env:QQ_BOT_CLIENT_SECRET)) { "当前进程未设置" } else { "当前进程已设置" }
 ```
 
-如果刚设置过用户环境变量，已经运行的 Web 控制面不会自动刷新环境变量。请关闭旧 Web 控制面，在设置好环境变量的 PowerShell 中重新执行 `start.ps1`。
+如果使用的是 `$env:` 临时变量，请关闭旧 Web 控制面，并在设置变量的同一个 PowerShell 中重新执行 `start.ps1`。如果使用 Windows 用户环境变量，程序会在绑定和检查时直接读取最新值。
 
 ### 运行前检查提示 QQ 客户端不可用
 
@@ -542,7 +559,7 @@ Get-CimInstance Win32_Process |
 .\.venv\Scripts\python.exe -m app.main run --config config.toml
 ```
 
-直接运行时不会提供 Web UI。真实发送模式仍要求密钥已经存在于当前 PowerShell 会话；建议先在 Web UI 中执行运行前检查。
+直接运行时不会提供 Web UI。真实发送模式要求密钥存在于当前 PowerShell 进程环境变量或 Windows 当前用户环境变量；建议先在 Web UI 中执行运行前检查。
 
 ### Dry-run
 
