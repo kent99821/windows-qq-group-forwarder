@@ -9,7 +9,7 @@
 - 通过 Windows `UserNotificationListener` API 监听 QQ 通知；
 - 在通知 API 不可用时回退到 UI Automation 和快速轮询；
 - 监听多个 QQ 群或联系人；
-- 将消息转发到一个 B 群 QQ 官方机器人；
+- 将消息转发到一个或多个 B 群 QQ 官方机器人；
 - 失败消息重试和 QQ 聊天窗口历史补发；
 - Web UI 管理监听会话、运行模式、检查结果和补发操作；
 - 运行前检查、主动消息测试以及本地 SQLite 消息队列。
@@ -136,16 +136,16 @@ discarded
 
 图片暂存文件必须等所有目标机器人发送完成后再删除。如果只有部分机器人发送成功，图片文件必须继续保留。
 
-### 4.3 当前配置只支持一个机器人
+### 4.3 单机器人配置（历史状态与兼容策略）
 
-目前 `DestinationConfig` 只有一个：
+旧版本 `DestinationConfig` 只有一个目标。当前阶段已扩展为 `AppConfig.destinations` 列表，并保留 `AppConfig.destination` 作为第一个机器人的兼容别名：
 
 - `app_id`；
 - `client_secret_env`；
 - `group_openid`；
 - `message_prefix`。
 
-后续应改为机器人配置列表，每个机器人至少包含：
+每个机器人至少包含：
 
 ```toml
 [[destinations]]
@@ -158,9 +158,9 @@ message_prefix = "[转发]"
 
 机器人唯一身份应使用 `app_id` 或明确的 `bot_id + app_id`，不能只使用环境变量名判断。环境变量名只是密钥的读取方式，不一定能代表机器人身份。
 
-### 4.4 当前网关连接只支持一个机器人
+### 4.4 多机器人网关
 
-当前使用单个 `run_gateway_forever(destination, stop_event)`。多机器人后需要为每个机器人独立维护：
+当前使用 `run_gateways_forever(destinations, stop_event)`，为每个机器人独立维护：
 
 - API 客户端；
 - Token；
@@ -428,7 +428,7 @@ updated_at
 
 ## 9. 分阶段实施计划
 
-### 阶段一：单实例多机器人
+### 阶段一：单实例多机器人（当前推进中）
 
 目标：不引入多实例，先验证多目标投递模型。
 
@@ -443,6 +443,8 @@ updated_at
 - 图片文件在全部目标完成后清理；
 - Web UI 增加机器人管理；
 - 主动测试支持单机器人和全部机器人。
+
+本阶段的第一版实现已落地到当前代码：使用 `[[destinations]]` 配置多个机器人，Web UI 支持增删、按机器人绑定目标群和主动测试；消息投递状态存储在 `message_deliveries` 表中，并按机器人独立重试。后续验证重点是 QQ 官方机器人 API 的多账号权限、频率限制以及图片消息在多个目标群的发送结果。
 
 验收标准：
 

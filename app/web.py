@@ -19,10 +19,12 @@ from urllib.parse import urlparse
 from .bot_gateway import bind_group
 from .config import (
     AppConfig,
+    DestinationConfig,
     ListenerSession,
     load_config,
     save_dry_run,
-    save_group_openid,
+    save_destination_group_openid,
+    save_destinations,
     save_listener_names,
     save_listener_sessions,
     save_napcat_settings,
@@ -86,13 +88,26 @@ class ForwarderController:
             listener_names: list[str] = []
             client_secret_configured = False
             client_secret_env: str | None = None
+            destinations: list[dict[str, Any]] = []
             config_error = None
             if config_exists:
                 try:
                     config = self.config()
                     listener_names = list(config.source.listener_names)
                     client_secret_env = config.destination.client_secret_env
-                    client_secret_configured = bool(os.environ.get(config.destination.client_secret_env))
+                    client_secret_configured = bool(read_user_environment_variable(config.destination.client_secret_env))
+                    destinations = [
+                        {
+                            "bot_id": item.bot_id,
+                            "app_id": item.app_id,
+                            "client_secret_env": item.client_secret_env,
+                            "client_secret_configured": bool(read_user_environment_variable(item.client_secret_env)),
+                            "group_openid": item.group_openid,
+                            "group_openid_configured": not _looks_like_unconfigured(item.group_openid),
+                            "message_prefix": item.message_prefix,
+                        }
+                        for item in config.destinations
+                    ]
                     store = StateStore(config.runtime.database_path)
                     try:
                         summary = store.summary()
@@ -117,6 +132,7 @@ class ForwarderController:
                 "listener_groups": listener_names,
                 "client_secret_configured": client_secret_configured,
                 "client_secret_env": client_secret_env,
+                "destinations": destinations,
                 "dry_run": config.runtime.dry_run if config_exists and config_error is None else None,
                 "source_backend": config.source.backend if config_exists and config_error is None else None,
                 "napcat": (
@@ -156,10 +172,20 @@ class ForwarderController:
                 save_dry_run(self.config_path, dry_run)
             config = self.config()
             effective_dry_run = config.runtime.dry_run if dry_run is None else dry_run
-            if not effective_dry_run and not os.environ.get(config.destination.client_secret_env):
+            missing_secrets = [
+                item.client_secret_env
+                for item in config.destinations
+                if not read_user_environment_variable(item.client_secret_env)
+            ]
+            if not effective_dry_run and missing_secrets:
+                missing_detail = (
+                    f"当前 Web 控制面进程未读取环境变量 {missing_secrets[0]}；"
+                    if len(missing_secrets) == 1
+                    else f"当前 Web 控制面进程未读取环境变量：{', '.join(missing_secrets)}；"
+                )
                 raise RuntimeError(
-                    f"当前 Web 控制面进程未读取环境变量 {config.destination.client_secret_env}；"
-                    "请重新启动 Web 控制面后再运行检查"
+                    missing_detail +
+                    "请在 Windows 用户环境变量中设置该变量后重试"
                 )
             check = run_preflight(self.config_path)
             if not check["ready"]:
@@ -325,14 +351,51 @@ class ForwarderController:
         """Backward-compatible alias for the old group-specific API."""
         return self.remove_listener_name(group_name)
 
-    def bind_destination_group(self) -> dict[str, Any]:
+    def add_destination(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped("添加转发机器人")
+            destination = DestinationConfig(
+                app_id=str(body.get("app_id", "")).strip(),
+                client_secret_env=str(body.get("client_secret_env", "")).strip(),
+                group_openid=str(body.get("group_openid", "待绑定")).strip() or "待绑定",
+                message_prefix=str(body.get("message_prefix", "[A群转发]")).strip(),
+                bot_id=str(body.get("bot_id", "")).strip(),
+            )
+            config = self.config()
+            if any(item.bot_id == destination.bot_id for item in config.destinations):
+                raise ValueError(f"机器人已存在：{destination.bot_id}")
+            saved = save_destinations(self.config_path, [*config.destinations, destination])
+            return {"destinations": [item.bot_id for item in saved]}
+
+    def remove_destination(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            self._require_forwarder_stopped("删除转发机器人")
+            bot_id = str(body.get("bot_id", "")).strip()
+            config = self.config()
+            if len(config.destinations) <= 1:
+                raise ValueError("至少需要保留一个转发机器人")
+            saved = [item for item in config.destinations if item.bot_id != bot_id]
+            if len(saved) == len(config.destinations):
+                raise ValueError(f"未找到机器人：{bot_id}")
+            save_destinations(self.config_path, saved)
+            return {"destinations": [item.bot_id for item in saved]}
+
+    def bind_destination_group(self, bot_id: object = None) -> dict[str, Any]:
         with self.lock:
             if self._alive():
                 raise RuntimeError("请先停止转发服务，再执行 QQ 群绑定")
         config = self.config()
-        group_openid = asyncio.run(bind_group(config.destination))
-        save_group_openid(self.config_path, group_openid)
-        return {"group_bound": True, "group_openid_preview": f"{group_openid[:6]}...{group_openid[-4:]}"}
+        selected_id = str(bot_id or config.destination.bot_id).strip()
+        destination = next((item for item in config.destinations if item.bot_id == selected_id), None)
+        if destination is None:
+            raise ValueError(f"未找到机器人：{selected_id}")
+        group_openid = asyncio.run(bind_group(destination))
+        save_destination_group_openid(self.config_path, selected_id, group_openid)
+        return {
+            "group_bound": True,
+            "bot_id": selected_id,
+            "group_openid_preview": f"{group_openid[:6]}...{group_openid[-4:]}",
+        }
 
     def inspect_window(self) -> dict[str, Any]:
         config = self.config()
@@ -346,8 +409,8 @@ class ForwarderController:
     def preflight(self) -> dict[str, Any]:
         return run_preflight(self.config_path)
 
-    async def _send_test_message(self, config: AppConfig) -> None:
-        sender = OfficialQqBotSender(config.destination)
+    async def _send_test_message(self, destination: Any) -> None:
+        sender = OfficialQqBotSender(destination)
         try:
             await sender.start()
             await sender.send(IncomingMessage.create(
@@ -358,27 +421,51 @@ class ForwarderController:
         finally:
             await sender.close()
 
-    def send_test_message(self) -> dict[str, Any]:
+    def send_test_message(self, bot_id: object = None) -> dict[str, Any]:
         config = self.config()
-        if _looks_like_unconfigured(config.destination.app_id):
-            raise RuntimeError("尚未填写有效的机器人 AppID")
-        if _looks_like_unconfigured(config.destination.group_openid):
-            raise RuntimeError("尚未绑定 QQ 群，请先完成 group_openid 绑定")
-        if not os.environ.get(config.destination.client_secret_env):
-            raise RuntimeError(f"未读取机器人密钥环境变量 {config.destination.client_secret_env}")
-        asyncio.run(self._send_test_message(config))
-        value = config.destination.group_openid
+        selected_id = str(bot_id).strip() if bot_id else None
+        destinations = [
+            item for item in config.destinations
+            if selected_id is None or item.bot_id == selected_id
+        ]
+        if not destinations:
+            raise RuntimeError(f"未找到机器人：{selected_id}")
+        results: list[dict[str, str]] = []
+        for destination in destinations:
+            try:
+                if _looks_like_unconfigured(destination.app_id):
+                    raise RuntimeError("尚未填写有效的机器人 AppID")
+                if _looks_like_unconfigured(destination.group_openid):
+                    raise RuntimeError("尚未绑定 QQ 群，请先完成 group_openid 绑定")
+                if not read_user_environment_variable(destination.client_secret_env):
+                    raise RuntimeError(f"未读取机器人密钥环境变量 {destination.client_secret_env}")
+                asyncio.run(self._send_test_message(destination))
+            except Exception as exc:
+                results.append({"bot_id": destination.bot_id, "status": "failed", "detail": str(exc)})
+            else:
+                results.append({"bot_id": destination.bot_id, "status": "sent", "detail": "测试消息已发送"})
+        success_count = sum(item["status"] == "sent" for item in results)
         return {
-            "message": "主动测试消息已发送到 QQ 群",
-            "group_openid_preview": f"{value[:6]}…{value[-4:]}",
+            "message": f"已完成 {len(results)} 个机器人主动测试，成功 {success_count} 个",
+            "results": results,
         }
 
     def failed_messages(self) -> dict[str, Any]:
         config = self.config()
         store = StateStore(config.runtime.database_path)
         try:
-            items = [
-                {
+            items = []
+            for row in store.failed():
+                deliveries = [
+                    {
+                        "bot_id": str(delivery["bot_id"]),
+                        "status": str(delivery["status"]),
+                        "attempts": int(delivery["attempts"]),
+                        "last_error": str(delivery["last_error"] or ""),
+                    }
+                    for delivery in store.deliveries(str(row["message_key"]))
+                ]
+                items.append({
                     "message_key": str(row["message_key"]),
                     "source_group": str(row["source_group"]),
                     "sender": str(row["sender"]) if row["sender"] is not None else None,
@@ -387,9 +474,8 @@ class ForwarderController:
                     "observed_at": str(row["observed_at"]),
                     "attempts": int(row["attempts"]),
                     "last_error": str(row["last_error"] or "未知错误"),
-                }
-                for row in store.failed()
-            ]
+                    "deliveries": deliveries,
+                })
         finally:
             store.close()
         return {"items": items, "count": len(items)}
@@ -496,7 +582,7 @@ class ForwarderController:
 
 def _looks_like_unconfigured(value: str) -> bool:
     normalized = value.strip().casefold()
-    return not normalized or "替换" in normalized or "group_openid" in normalized
+    return not normalized or "替换" in normalized or "待绑定" in normalized or "group_openid" in normalized
 
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -589,6 +675,14 @@ class ControlHandler(BaseHTTPRequestHandler):
                 result = self.controller.set_source_backend(body.get("backend"))
             elif path == "/api/actions/napcat":
                 result = self.controller.save_napcat(body)
+            elif path == "/api/actions/destinations":
+                action = body.get("action")
+                if action == "add":
+                    result = self.controller.add_destination(body)
+                elif action == "remove":
+                    result = self.controller.remove_destination(body)
+                else:
+                    raise ValueError("action 必须是 add 或 remove")
             elif path == "/api/actions/listener-sessions":
                 action = body.get("action")
                 if action == "add":
@@ -604,7 +698,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             elif path == "/api/actions/preflight":
                 result = self.controller.preflight()
             elif path == "/api/actions/test-message":
-                result = self.controller.send_test_message()
+                result = self.controller.send_test_message(body.get("bot_id"))
             elif path == "/api/actions/retry-failed":
                 result = self.controller.retry_failed_messages(body.get("message_keys"))
             elif path == "/api/actions/history-preview":
@@ -623,7 +717,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 else:
                     raise ValueError("action 必须是 add 或 remove")
             elif path == "/api/actions/bind-group":
-                result = self.controller.bind_destination_group()
+                result = self.controller.bind_destination_group(body.get("bot_id"))
             else:
                 self._json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
                 return

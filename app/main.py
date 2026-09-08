@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-from .bot_gateway import run_gateway_forever
+from .bot_gateway import run_gateways_forever
 from .config import AppConfig, load_config
 from .destination.qq_bot import OfficialQqBotSender
 from .models import IncomingMessage
@@ -42,61 +42,79 @@ def setup_logging(path: Path) -> None:
     )
 
 
-async def process_pending(config: AppConfig, store: StateStore, sender: OfficialQqBotSender | None) -> None:
+async def process_pending(
+    config: AppConfig,
+    store: StateStore,
+    sender: OfficialQqBotSender | dict[str, OfficialQqBotSender] | None,
+) -> None:
     logger = logging.getLogger(__name__)
+    destinations = config.destinations
+    senders = sender if isinstance(sender, dict) else ({config.destination.bot_id: sender} if sender else {})
+    store.ensure_deliveries(tuple(destination.bot_id for destination in destinations))
     for row in store.pending():
         key = str(row["message_key"])
         if config.runtime.dry_run:
-            logger.info("dry-run：保留 1 条待发送消息 key=%s", key[:12])
+            logger.info("dry-run：保留 %d 条机器人投递 key=%s", len(store.pending_deliveries(key)), key[:12])
             continue
-        if sender is None:
-            raise RuntimeError("真实发送模式下未创建 QQ 群机器人发送器")
         logger.info(
-            "准备转发消息 source_group=%s kind=%s content=%s",
+            "准备转发消息 source_group=%s kind=%s content=%s destinations=%d",
             row["source_group"],
             row["kind"],
             row["content"],
+            len(store.pending_deliveries(key)),
         )
-        attempts_before = int(row["attempts"])
-        remaining_attempts = config.runtime.max_send_attempts - attempts_before
-        if remaining_attempts <= 0:
-            store.mark_failed(key, str(row["last_error"] or "已达到最大重试次数"))
-            logger.error("消息已进入失败队列 key=%s attempts=%d", key[:12], attempts_before)
-            continue
-        for offset in range(remaining_attempts):
-            attempt = attempts_before + offset + 1
-            try:
-                await sender.send(IncomingMessage(
-                    message_key=key,
-                    source_group=str(row["source_group"]),
-                    content=str(row["content"]),
-                    sender=str(row["sender"]) if row["sender"] is not None else None,
-                    kind=str(row["kind"]),
-                    observed_at=str(row["observed_at"]),
-                    media_path=str(row["media_path"]) if row["media_path"] is not None else None,
-                ))
-                store.mark_attempt(key)
-                store.mark_sent(key)
-                media_path = row["media_path"]
-                if media_path:
-                    staged_path = Path(str(media_path))
-                    staging_dir = config.runtime.database_path.parent / "image-cache"
-                    try:
-                        if staged_path.resolve().parent == staging_dir.resolve():
-                            staged_path.unlink(missing_ok=True)
-                    except OSError as exc:
-                        logger.warning("已发送图片但清理暂存文件失败 path=%s error=%s", staged_path, type(exc).__name__)
-                logger.info("消息已发送 key=%s attempt=%d", key[:12], attempt)
-                break
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                store.mark_attempt(key, error)
-                logger.warning("发送失败 key=%s attempt=%d/%d error=%s", key[:12], attempt, config.runtime.max_send_attempts, type(exc).__name__)
-                if attempt >= config.runtime.max_send_attempts:
-                    store.mark_failed(key, error)
-                    logger.error("消息已进入失败队列 key=%s attempts=%d", key[:12], attempt)
+        message = IncomingMessage(
+            message_key=key,
+            source_group=str(row["source_group"]),
+            content=str(row["content"]),
+            sender=str(row["sender"]) if row["sender"] is not None else None,
+            kind=str(row["kind"]),
+            observed_at=str(row["observed_at"]),
+            media_path=str(row["media_path"]) if row["media_path"] is not None else None,
+        )
+        for delivery in store.pending_deliveries(key):
+            bot_id = str(delivery["bot_id"])
+            target_sender = senders.get(bot_id)
+            attempts_before = int(delivery["attempts"])
+            remaining_attempts = config.runtime.max_send_attempts - attempts_before
+            if target_sender is None:
+                store.mark_delivery_failed(key, bot_id, "真实发送模式下未创建该机器人的发送器")
+                logger.error("机器人投递失败 key=%s bot_id=%s 原因=发送器未创建", key[:12], bot_id)
+                continue
+            if remaining_attempts <= 0:
+                store.mark_delivery_failed(key, bot_id, str(delivery["last_error"] or "已达到最大重试次数"))
+                logger.error("机器人投递进入失败队列 key=%s bot_id=%s attempts=%d", key[:12], bot_id, attempts_before)
+                continue
+            for offset in range(remaining_attempts):
+                attempt = attempts_before + offset + 1
+                try:
+                    await target_sender.send(message)
+                    store.mark_delivery_attempt(key, bot_id)
+                    store.mark_delivery_sent(key, bot_id)
+                    logger.info("消息已发送 key=%s bot_id=%s attempt=%d", key[:12], bot_id, attempt)
                     break
-                await asyncio.sleep(min(2 ** offset, 10))
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    store.mark_delivery_attempt(key, bot_id, error)
+                    logger.warning(
+                        "发送失败 key=%s bot_id=%s attempt=%d/%d error=%s",
+                        key[:12], bot_id, attempt, config.runtime.max_send_attempts, type(exc).__name__,
+                    )
+                    if attempt >= config.runtime.max_send_attempts:
+                        store.mark_delivery_failed(key, bot_id, error)
+                        logger.error("机器人投递进入失败队列 key=%s bot_id=%s attempts=%d", key[:12], bot_id, attempt)
+                        break
+                    await asyncio.sleep(min(2 ** offset, 10))
+        if store.message_fully_sent(key):
+            media_path = row["media_path"]
+            if media_path:
+                staged_path = Path(str(media_path))
+                staging_dir = config.runtime.database_path.parent / "image-cache"
+                try:
+                    if staged_path.resolve().parent == staging_dir.resolve():
+                        staged_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("已发送图片但清理暂存文件失败 path=%s error=%s", staged_path, type(exc).__name__)
 
 
 async def collect_notifications(
@@ -127,7 +145,11 @@ async def collect_napcat(
     await source.run(output, stop_event)
 
 
-def enqueue_message(store: StateStore, message: IncomingMessage) -> bool:
+def enqueue_message(
+    store: StateStore,
+    message: IncomingMessage,
+    destination_ids: tuple[str, ...] | list[str] = (),
+) -> bool:
     logger = logging.getLogger(__name__)
     if is_low_value_message(message):
         logger.info(
@@ -136,7 +158,7 @@ def enqueue_message(store: StateStore, message: IncomingMessage) -> bool:
             message.content,
         )
         return False
-    if store.enqueue(message):
+    if store.enqueue(message, destination_ids):
         logger.info(
             "监听到新消息 source_group=%s kind=%s content=%s",
             message.source_group,
@@ -161,6 +183,7 @@ async def route_notification_batches(
     store: StateStore,
     send_signal: asyncio.Event,
     history_reader: QqHistoryReader | None = None,
+    destination_ids: tuple[str, ...] | list[str] = (),
 ) -> None:
     """补读聊天记录后路由；通知采集任务仍独立高速运行。"""
     while True:
@@ -173,13 +196,13 @@ async def route_notification_batches(
             enqueued = False
             for message in text_messages:
                 if message.kind == "image" and not message.media_path:
-                    if store.enqueue_failed(message, "NapCat 图片原图未取得，禁止发送占位消息"):
+                    if store.enqueue_failed(message, "NapCat 图片原图未取得，禁止发送占位消息", destination_ids):
                         logging.getLogger(__name__).error(
                             "NapCat 图片消息已记录为失败，不会发送占位提示 key=%s source_group=%s",
                             message.message_key[:12], message.source_group,
                         )
                     continue
-                enqueued = enqueue_message(store, message) or enqueued
+                enqueued = enqueue_message(store, message, destination_ids) or enqueued
             if enqueued:
                 send_signal.set()
             if image_messages:
@@ -198,6 +221,7 @@ async def process_image_batches(
 ) -> None:
     logger = logging.getLogger(__name__)
     staging_dir = config.runtime.database_path.parent / "image-cache"
+    destination_ids = tuple(destination.bot_id for destination in config.destinations)
     while True:
         messages = await image_queue.get()
         try:
@@ -245,7 +269,7 @@ async def process_image_batches(
                         logger.warning("图片原图未取得，禁止发送 [图片] 占位提示")
                 if message.kind == "toast_image_notice" or not message.media_path:
                     error = "图片原图未取得：QQ 聊天窗口复制和缓存目录匹配均失败"
-                    if store.enqueue_failed(message, error):
+                    if store.enqueue_failed(message, error, destination_ids):
                         logger.error(
                             "图片消息已记录为失败，不会转发占位提示 key=%s source_group=%s content=%s",
                             message.message_key[:12],
@@ -255,7 +279,7 @@ async def process_image_batches(
                     else:
                         logger.debug("忽略重复的失败图片消息 key=%s", message.message_key[:12])
                     continue
-                enqueued = enqueue_message(store, message) or enqueued
+                enqueued = enqueue_message(store, message, destination_ids) or enqueued
             if enqueued:
                 send_signal.set()
         finally:
@@ -265,7 +289,7 @@ async def process_image_batches(
 async def send_pending_forever(
     config: AppConfig,
     store: StateStore,
-    sender: OfficialQqBotSender | None,
+    sender: dict[str, OfficialQqBotSender] | OfficialQqBotSender | None,
     send_signal: asyncio.Event,
 ) -> None:
     logger = logging.getLogger(__name__)
@@ -292,7 +316,8 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
     lock_path = config.runtime.database_path.parent / "forwarder.lock"
     with SingleInstanceLock(lock_path, "转发服务"):
         store = StateStore(config.runtime.database_path)
-        discarded = store.discard_legacy_pending()
+        # NapCat 的普通消息 kind 同样是 text，不能把它们误判成旧 UIA 队列。
+        discarded = store.discard_legacy_pending() if config.source.backend == "windows_notification" else 0
         if discarded:
             logging.getLogger(__name__).warning("已废弃 %d 条旧窗口扫描待发送记录，不会发送到 QQ 群", discarded)
         napcat_source: NapcatOneBotSource | None = None
@@ -311,7 +336,9 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
             history_reader = QqHistoryReader(config.source)
             image_cache = QqImageCache(config.source)
             window_image_reader = QqWindowImageReader(config.source)
-        sender: OfficialQqBotSender | None = None
+        senders: dict[str, OfficialQqBotSender] = {}
+        destination_ids = tuple(destination.bot_id for destination in config.destinations)
+        store.ensure_deliveries(destination_ids)
         gateway_stop = asyncio.Event()
         gateway_task: asyncio.Task[None] | None = None
         notification_queue: asyncio.Queue[list[IncomingMessage]] = asyncio.Queue()
@@ -322,17 +349,20 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
             if reader is not None and image_cache is not None:
                 reader.prime()
                 image_cache.prime()
-            gateway_task = asyncio.create_task(run_gateway_forever(config.destination, gateway_stop))
+            gateway_task = asyncio.create_task(run_gateways_forever(config.destinations, gateway_stop))
             if not config.runtime.dry_run:
-                sender = OfficialQqBotSender(config.destination)
-                await sender.start()
+                for destination in config.destinations:
+                    current_sender = OfficialQqBotSender(destination)
+                    await current_sender.start()
+                    senders[destination.bot_id] = current_sender
             if history_reader is not None:
                 await asyncio.to_thread(history_reader.prime)
             logger.info(
-                "QQ 转发器已启动 source_backend=%s source_names=%s notification_backend=%s dry_run=%s",
+                "QQ 转发器已启动 source_backend=%s source_names=%s notification_backend=%s destinations=%d dry_run=%s",
                 config.source.backend,
                 ",".join(config.source.listener_names),
                 reader.backend_name if reader is not None else "napcat-onebot-websocket",
+                len(config.destinations),
                 config.runtime.dry_run,
             )
             send_signal.set()
@@ -356,11 +386,12 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                         store,
                         send_signal,
                         history_reader,
+                        destination_ids,
                     ),
                     name="qq-notification-router",
                 ),
                 asyncio.create_task(
-                    send_pending_forever(config, store, sender, send_signal),
+                    send_pending_forever(config, store, senders, send_signal),
                     name="qq-message-sender",
                 ),
             ]
@@ -398,8 +429,8 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
                 except asyncio.TimeoutError:
                     gateway_task.cancel()
                     await asyncio.gather(gateway_task, return_exceptions=True)
-            if sender is not None:
-                await sender.close()
+            for current_sender in senders.values():
+                await current_sender.close()
             store.close()
 
 

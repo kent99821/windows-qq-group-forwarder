@@ -67,6 +67,15 @@ class DestinationConfig:
     client_secret_env: str
     group_openid: str
     message_prefix: str
+    bot_id: str = ""
+
+    def __post_init__(self) -> None:
+        bot_id = self.bot_id.strip() or self.app_id.strip()
+        if not bot_id:
+            raise ValueError("机器人 bot_id 不能为空")
+        if any(char in bot_id for char in "\r\n"):
+            raise ValueError("机器人 bot_id 不能包含换行")
+        object.__setattr__(self, "bot_id", bot_id)
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,19 @@ class AppConfig:
     destination: DestinationConfig
     runtime: RuntimeConfig
     napcat: NapcatConfig = NapcatConfig()
+    destinations: tuple[DestinationConfig, ...] = ()
+
+    def __post_init__(self) -> None:
+        destinations = tuple(self.destinations) or (self.destination,)
+        if not destinations:
+            raise ValueError("至少需要配置一个转发机器人")
+        seen: set[str] = set()
+        for destination in destinations:
+            if destination.bot_id in seen:
+                raise ValueError(f"机器人 bot_id 重复：{destination.bot_id}")
+            seen.add(destination.bot_id)
+        object.__setattr__(self, "destinations", destinations)
+        object.__setattr__(self, "destination", destinations[0])
 
 
 def _required(table: dict[str, object], key: str) -> str:
@@ -117,14 +139,25 @@ def load_config(path: Path) -> AppConfig:
         raw = tomllib.load(handle)
     source = raw.get("source")
     destination = raw.get("destination")
+    destinations_raw = raw.get("destinations")
     runtime = raw.get("runtime")
     napcat = raw.get("napcat", {})
-    if not all(isinstance(item, dict) for item in (source, destination, runtime, napcat)):
-        raise ValueError("config.toml 必须包含 [source]、[destination]、[runtime]，NapCat 配置可选")
+    if not all(isinstance(item, dict) for item in (source, runtime, napcat)):
+        raise ValueError("config.toml 必须包含 [source]、[runtime]，NapCat 配置可选")
     assert isinstance(source, dict)
-    assert isinstance(destination, dict)
     assert isinstance(runtime, dict)
     assert isinstance(napcat, dict)
+
+    if destinations_raw is not None:
+        if not isinstance(destinations_raw, list) or not all(isinstance(item, dict) for item in destinations_raw):
+            raise ValueError("destinations 必须是对象数组")
+        destination_tables = destinations_raw
+    elif isinstance(destination, dict):
+        destination_tables = [destination]
+    else:
+        raise ValueError("config.toml 必须包含 [destination] 或至少一个 [[destinations]]")
+    if not destination_tables:
+        raise ValueError("至少需要配置一个转发机器人")
 
     backend = str(source.get("backend", "windows_notification")).strip().casefold()
     if backend not in {"windows_notification", "napcat"}:
@@ -234,6 +267,17 @@ def load_config(path: Path) -> AppConfig:
             cache_path = base_dir / cache_path
         image_cache_paths.append(cache_path.resolve())
 
+    destinations = tuple(
+        DestinationConfig(
+            app_id=_required(item, "app_id"),
+            client_secret_env=_environment_name(item, "client_secret_env"),
+            group_openid=_required(item, "group_openid"),
+            message_prefix=str(item.get("message_prefix", "[A群转发]")).strip(),
+            bot_id=str(item.get("bot_id", "")).strip(),
+        )
+        for item in destination_tables
+    )
+
     return AppConfig(
         source=SourceConfig(
             group_name=listener_names[0] if listener_names else (sessions[0].name if sessions else ""),
@@ -250,12 +294,7 @@ def load_config(path: Path) -> AppConfig:
             backend=backend,
             sessions=tuple(sessions),
         ),
-        destination=DestinationConfig(
-            app_id=_required(destination, "app_id"),
-            client_secret_env=_environment_name(destination, "client_secret_env"),
-            group_openid=_required(destination, "group_openid"),
-            message_prefix=str(destination.get("message_prefix", "[A群转发]")).strip(),
-        ),
+        destination=destinations[0],
         runtime=RuntimeConfig(
             database_path=database_path,
             log_path=log_path,
@@ -268,22 +307,16 @@ def load_config(path: Path) -> AppConfig:
             token_env=token_env,
             **napcat_values,
         ),
+        destinations=destinations,
     )
 
 
 def save_group_openid(path: Path, group_openid: str) -> None:
-    """只更新 destination.group_openid，保留其他 TOML 配置。"""
+    """兼容旧调用：更新第一个转发机器人的目标群。"""
     if not group_openid.strip():
         raise ValueError("group_openid 不能为空")
-    path = path.resolve()
-    content = path.read_text(encoding="utf-8")
-    pattern = re.compile(r'(?m)^(group_openid\s*=\s*)"[^"]*"\s*$')
-    updated, count = pattern.subn(lambda match: f'{match.group(1)}"{group_openid}"', content)
-    if count != 1:
-        raise ValueError("config.toml 中未找到唯一的 destination.group_openid 配置")
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(updated, encoding="utf-8")
-    temp.replace(path)
+    config = load_config(path)
+    save_destination_group_openid(path, config.destinations[0].bot_id, group_openid)
 
 
 def save_dry_run(path: Path, dry_run: bool) -> None:
@@ -390,6 +423,91 @@ def _replace_table_option(path: Path, table_name: str, option: str, value: str) 
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text("".join(lines), encoding="utf-8")
     temp.replace(path)
+
+
+def _table_end(lines: list[str], start: int) -> int:
+    return next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].strip().startswith("[") and lines[index].strip().endswith("]")
+        ),
+        len(lines),
+    )
+
+
+def _serialize_destinations(destinations: tuple[DestinationConfig, ...], newline: str) -> list[str]:
+    body: list[str] = []
+    for destination in destinations:
+        body.extend([
+            "[[destinations]]" + newline,
+            f"bot_id = {json.dumps(destination.bot_id, ensure_ascii=False)}" + newline,
+            f"app_id = {json.dumps(destination.app_id, ensure_ascii=False)}" + newline,
+            f"client_secret_env = {json.dumps(destination.client_secret_env, ensure_ascii=False)}" + newline,
+            f"group_openid = {json.dumps(destination.group_openid, ensure_ascii=False)}" + newline,
+            f"message_prefix = {json.dumps(destination.message_prefix, ensure_ascii=False)}" + newline,
+            newline,
+        ])
+    return body
+
+
+def save_destinations(path: Path, destinations: list[DestinationConfig] | tuple[DestinationConfig, ...]) -> tuple[DestinationConfig, ...]:
+    """Replace legacy/single destination config with the multi-destination array."""
+    normalized = tuple(destinations)
+    if not normalized:
+        raise ValueError("至少需要配置一个转发机器人")
+    seen: set[str] = set()
+    for destination in normalized:
+        if destination.bot_id in seen:
+            raise ValueError(f"机器人 bot_id 重复：{destination.bot_id}")
+        seen.add(destination.bot_id)
+
+    path = path.resolve()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    starts = [
+        index for index, line in enumerate(lines)
+        if line.strip() in {"[destination]", "[[destinations]]"}
+    ]
+    if starts:
+        start = starts[0]
+        end = _table_end(lines, start)
+        # Consume all adjacent destination array tables, not just the first one.
+        while end < len(lines) and lines[end].strip() == "[[destinations]]":
+            end = _table_end(lines, end)
+        updated = lines[:start] + _serialize_destinations(normalized, newline) + lines[end:]
+    else:
+        insert_at = next(
+            (index for index, line in enumerate(lines) if line.strip() == "[runtime]"),
+            len(lines),
+        )
+        updated = lines[:insert_at] + _serialize_destinations(normalized, newline) + lines[insert_at:]
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text("".join(updated), encoding="utf-8")
+    temp.replace(path)
+    return normalized
+
+
+def save_destination_group_openid(path: Path, bot_id: str, group_openid: str) -> None:
+    """Update one bot target group while preserving all other bot settings."""
+    if not bot_id.strip():
+        raise ValueError("bot_id 不能为空")
+    if not group_openid.strip():
+        raise ValueError("group_openid 不能为空")
+    config = load_config(path)
+    updated = [
+        DestinationConfig(
+            app_id=item.app_id,
+            client_secret_env=item.client_secret_env,
+            group_openid=group_openid if item.bot_id == bot_id.strip() else item.group_openid,
+            message_prefix=item.message_prefix,
+            bot_id=item.bot_id,
+        )
+        for item in config.destinations
+    ]
+    if not any(item.bot_id == bot_id.strip() for item in config.destinations):
+        raise ValueError(f"未找到机器人：{bot_id.strip()}")
+    save_destinations(path, updated)
 
 
 def save_source_backend(path: Path, backend: str) -> str:

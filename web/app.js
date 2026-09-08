@@ -94,11 +94,86 @@ async function refreshStatus() {
     $("preview-history-button").disabled = running || !(status.listener_names || []).length;
     $("history-listener-select").disabled = running || !(status.listener_names || []).length;
     renderListenerNames(status.listener_names || status.listener_groups || [], running);
+    renderDestinations(status.destinations || [], running);
   } catch (error) {
     $("status-badge").textContent = "控制面异常";
     $("status-badge").className = "badge offline";
     show(error.message);
   }
+}
+
+function renderDestinations(destinations, running) {
+  const selectedBotId = $("destination-bot-select").value;
+  const list = $("destinations-list");
+  const select = $("destination-bot-select");
+  list.replaceChildren();
+  select.replaceChildren();
+  destinations.forEach((destination) => {
+    const row = document.createElement("div");
+    row.className = "listener-group-row destination-row";
+    const copy = document.createElement("span");
+    const secretState = destination.client_secret_configured ? "密钥已读取" : "密钥未读取";
+    const groupState = destination.group_openid_configured ? "已绑定目标群" : "待绑定目标群";
+    copy.textContent = destination.bot_id + " · AppID " + destination.app_id + " · " + groupState + " · " + secretState;
+    const remove = document.createElement("button");
+    remove.className = "danger-button";
+    remove.textContent = "删除";
+    remove.disabled = running || destinations.length <= 1;
+    remove.addEventListener("click", () => removeDestination(destination));
+    row.append(copy, remove);
+    list.appendChild(row);
+    const option = document.createElement("option");
+    option.value = destination.bot_id;
+    option.textContent = destination.bot_id + " · " + (destination.group_openid_configured ? "已绑定" : "待绑定");
+    select.appendChild(option);
+  });
+  if (!destinations.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "暂无转发机器人";
+    list.appendChild(empty);
+  }
+  if (destinations.some((destination) => destination.bot_id === selectedBotId)) {
+    select.value = selectedBotId;
+  }
+  $("add-destination-button").disabled = running;
+  $("destination-bot-select").disabled = running || destinations.length === 0;
+  $("bind-button").disabled = running || destinations.length === 0;
+  $("test-message-button").disabled = running || destinations.length === 0;
+  $("test-all-message-button").disabled = running || destinations.length === 0;
+}
+
+async function addDestination() {
+  const body = {
+    action: "add",
+    bot_id: $("destination-bot-id").value.trim(),
+    app_id: $("destination-app-id").value.trim(),
+    client_secret_env: $("destination-secret-env").value.trim(),
+    group_openid: $("destination-group-openid").value.trim(),
+    message_prefix: $("destination-prefix").value.trim() || "[A群转发]",
+  };
+  if (!body.bot_id || !body.app_id || !body.client_secret_env) {
+    show("请填写机器人标识、AppID 和密钥环境变量名");
+    return;
+  }
+  await runButtonTask($("add-destination-button"), "添加中…", async () => {
+    await request("/api/actions/destinations", { method: "POST", body: JSON.stringify(body) });
+    ["destination-bot-id", "destination-app-id", "destination-secret-env", "destination-group-openid", "destination-prefix"].forEach((id) => $(id).value = "");
+    show("转发机器人已添加，请为它绑定目标 QQ 群");
+    await refreshStatus();
+  });
+}
+
+async function removeDestination(destination) {
+  if (!window.confirm("确定删除机器人“" + destination.bot_id + "”吗？")) return;
+  try {
+    await request("/api/actions/destinations", {
+      method: "POST",
+      body: JSON.stringify({ action: "remove", bot_id: destination.bot_id }),
+    });
+    show("转发机器人已删除");
+    await refreshStatus();
+  } catch (error) { show(error.message); }
 }
 
 function renderNapcatSessions(sessions, running) {
@@ -345,8 +420,11 @@ function openReplayDialog(title, summary, items, mode) {
     const copy = document.createElement("div");
     const meta = document.createElement("div");
     meta.className = "replay-item-meta";
+    const deliverySummary = (item.deliveries || []).map((delivery) =>
+      delivery.bot_id + ": " + (delivery.status === "sent" ? "已发送" : "失败 " + delivery.attempts + " 次")
+    ).join("，");
     meta.textContent = mode === "failed"
-      ? `${item.source_group} · 已尝试 ${item.attempts} 次 · ${item.kind}`
+      ? `${item.source_group} · 已尝试 ${item.attempts} 次 · ${item.kind}${deliverySummary ? " · " + deliverySummary : ""}`
       : `${item.source_group} · ${item.sender || "未知发送者"} · ${item.display_time || "时间未知"}`;
     const content = document.createElement("div");
     content.className = "replay-item-content";
@@ -457,6 +535,7 @@ $("preflight-button").addEventListener("click", runPreflight);
 $("save-source-backend").addEventListener("click", saveSourceBackend);
 $("save-napcat").addEventListener("click", saveNapcatSettings);
 $("add-napcat-session").addEventListener("click", addNapcatSession);
+$("add-destination-button").addEventListener("click", addDestination);
 $("dry-run").addEventListener("change", changeDryRun);
 $("refresh-log").addEventListener("click", refreshLog);
 $("inspect-button").addEventListener("click", async () => {
@@ -481,17 +560,24 @@ $("listener-name").addEventListener("keydown", (event) => {
 $("bind-button").addEventListener("click", async () => {
   if (!window.confirm("请先停止转发，并准备在 QQ 群 @机器人发送“绑定”。继续吗？")) return;
   await runButtonTask($("bind-button"), "连接中…", async () => {
-    show("正在连接 QQ 机器人，请在 QQ 群发送：@机器人 绑定");
-    const body = await request("/api/actions/bind-group", { method: "POST", body: "{}" });
-    show(`QQ 群绑定成功：${body.group_openid_preview}`);
+    const botId = $("destination-bot-select").value;
+    show("正在连接所选 QQ 机器人，请在目标 QQ 群发送：@机器人 绑定");
+    const body = await request("/api/actions/bind-group", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: botId }),
+    });
+    show("机器人 " + body.bot_id + " 绑定成功：" + body.group_openid_preview);
     await refreshStatus();
   });
 });
 $("test-message-button").addEventListener("click", async () => {
-  if (!window.confirm("将立即向已绑定的 QQ 群真实发送一条测试消息，继续吗？")) return;
+  if (!window.confirm("将立即向所选机器人目标群真实发送一条测试消息，继续吗？")) return;
   await runButtonTask($("test-message-button"), "发送中…", async () => {
-    show("正在向 QQ 群发送主动测试消息…");
-    const body = await request("/api/actions/test-message", { method: "POST", body: "{}" });
+    show("正在向所选 QQ 群发送主动测试消息…");
+    const body = await request("/api/actions/test-message", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: $("destination-bot-select").value }),
+    });
     show(body.message || "主动测试消息已发送");
   });
 });
@@ -508,6 +594,19 @@ $("replay-select-all").addEventListener("click", () => {
   $("replay-select-all").textContent = allChecked ? "全选" : "全不选";
 });
 $("replay-confirm").addEventListener("click", confirmReplaySelection);
+
+$("test-all-message-button").addEventListener("click", async () => {
+  if (!window.confirm("将立即向所有已配置机器人目标群真实发送测试消息，继续吗？")) return;
+  await runButtonTask($("test-all-message-button"), "发送中…", async () => {
+    show("正在向所有 QQ 群发送主动测试消息…");
+    const body = await request("/api/actions/test-message", {
+      method: "POST",
+      body: JSON.stringify({ bot_id: null }),
+    });
+    const failed = (body.results || []).filter((item) => item.status === "failed");
+    show((body.message || "主动测试已完成") + (failed.length ? "；失败：" + failed.map((item) => item.bot_id).join("、") : ""));
+  });
+});
 
 refreshStatus();
 refreshLog();

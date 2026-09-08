@@ -61,3 +61,20 @@ def test_history_preview_and_replay_use_stable_independent_keys(
     }
     assert second["queued"] == 0
     assert second["skipped"] == 2
+
+
+def test_add_destination_persists_new_bot(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    controller = ForwarderController(config_path)
+
+    result = controller.add_destination({
+        "bot_id": "bot-2",
+        "app_id": "app-2",
+        "client_secret_env": "TEST_SECRET_2",
+        "group_openid": "group-2",
+        "message_prefix": "[二群]",
+    })
+
+    assert result == {"destinations": ["app", "bot-2"]}
+    assert [item.bot_id for item in controller.config().destinations] == ["app", "bot-2"]

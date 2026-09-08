@@ -22,11 +22,21 @@ image_cache_wait_seconds = 45.0
 # UI 自动打开群聊并复制图片的最长等待时间。
 ui_image_wait_seconds = 8.0
 
-[destination]
+[[destinations]]
+# bot_id 必须唯一；同一个机器人只能配置一次。
+bot_id = "bot-1"
 app_id = "替换为机器人 AppID"
 client_secret_env = "QQ_BOT_CLIENT_SECRET"
 group_openid = "替换为 QQ 群 group_openid"
 message_prefix = "[A群转发]"
+
+# 可以继续增加机器人；同一批消息会发送到每个机器人的目标群。
+# [[destinations]]
+# bot_id = "bot-2"
+# app_id = "替换为第二个机器人 AppID"
+# client_secret_env = "QQ_BOT_2_CLIENT_SECRET"
+# group_openid = "替换为第二个 QQ 群 group_openid"
+# message_prefix = "[A群转发]"
 
 [runtime]
 database_path = "data/forwarder.sqlite3"

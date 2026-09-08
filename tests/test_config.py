@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from app.config import ListenerSession, load_config, save_dry_run, save_listener_names, save_listener_sessions
+from app.config import (
+    DestinationConfig,
+    ListenerSession,
+    load_config,
+    save_destinations,
+    save_dry_run,
+    save_listener_names,
+    save_listener_sessions,
+)
 
 
 def write_config(path: Path) -> None:
@@ -196,3 +204,22 @@ max_send_attempts = 1
     config = load_config(path)
 
     assert config.source.listener_names == ("发家致富",)
+
+
+def test_multiple_destinations_load_and_save(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    write_config(path)
+    destinations = [
+        DestinationConfig("app-1", "SECRET_1", "group-1", "[一群]", "bot-1"),
+        DestinationConfig("app-2", "SECRET_2", "group-2", "[二群]", "bot-2"),
+    ]
+
+    save_destinations(path, destinations)
+    config = load_config(path)
+
+    assert [(item.bot_id, item.app_id, item.group_openid) for item in config.destinations] == [
+        ("bot-1", "app-1", "group-1"),
+        ("bot-2", "app-2", "group-2"),
+    ]
+    assert config.destination.bot_id == "bot-1"
+    assert "[destination]" not in path.read_text(encoding="utf-8")

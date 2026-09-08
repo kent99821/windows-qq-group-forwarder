@@ -148,6 +148,12 @@ button.is-loading, button.is-loading:hover { cursor: wait; transform: none; box-
 .listener-group-add input:focus, .history-controls select:focus { outline: 3px solid rgba(53, 106, 230, .13); border-color: var(--blue); }
 .history-controls { align-items: center; }
 .source-config-panel { border-left: 3px solid #7c8ff2; }
+.destination-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.destination-form input, .destination-select-label + select { min-width: 0; height: 40px; padding: 0 10px; border: 1px solid #d6dde8; border-radius: 9px; background: #fbfcfe; color: #344158; font: inherit; }
+.destination-form button { align-self: stretch; }
+.destination-select-label { display: block; margin-top: 16px; color: #52627b; font-size: 12px; font-weight: 600; }
+.destination-select-label + select { display: block; width: 100%; margin-top: 6px; }
+.destination-row span { min-width: 0; overflow-wrap: anywhere; }
 .source-mode-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .source-mode-row label { color: #52627b; font-size: 13px; font-weight: 600; }
 .source-mode-row select, .napcat-form input, .session-add-form input, .session-add-form select {
@@ -166,7 +172,7 @@ button.is-loading, button.is-loading:hover { cursor: wait; transform: none; box-
 .session-add-form { display: grid; grid-template-columns: 130px 1fr 1fr auto; gap: 10px; margin-top: 12px; }
 .session-add-form input, .session-add-form select { width: 100%; }
 @media (max-width: 640px) {
-  .napcat-form, .session-add-form { grid-template-columns: 1fr; }
+  .napcat-form, .session-add-form, .destination-form { grid-template-columns: 1fr; }
   .napcat-form .inline-check { grid-column: auto; }
   .source-mode-row > * { width: 100%; }
 }

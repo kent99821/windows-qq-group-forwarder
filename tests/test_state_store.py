@@ -72,3 +72,26 @@ def test_message_can_be_recorded_as_failed_without_entering_pending_queue(tmp_pa
         assert store.failed()[0]["last_error"] == "图片原图未取得"
     finally:
         store.close()
+
+
+def test_message_has_independent_delivery_status_per_bot(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    try:
+        message = IncomingMessage.create("multi", "A 群", "你好")
+        assert store.enqueue(message, ["bot-1", "bot-2"]) is True
+        assert len(store.pending_deliveries("multi")) == 2
+
+        store.mark_delivery_attempt("multi", "bot-1")
+        store.mark_delivery_sent("multi", "bot-1")
+        store.mark_delivery_attempt("multi", "bot-2", "权限错误")
+        store.mark_delivery_failed("multi", "bot-2", "权限错误")
+
+        assert store.count("failed") == 1
+        assert {str(row["bot_id"]): str(row["status"]) for row in store.deliveries("multi")} == {
+            "bot-1": "sent",
+            "bot-2": "failed",
+        }
+        assert store.retry_failed(["multi"]) == 1
+        assert [str(row["bot_id"]) for row in store.pending_deliveries("multi")] == ["bot-2"]
+    finally:
+        store.close()

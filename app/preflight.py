@@ -19,7 +19,7 @@ from .source.windows_notification import WindowsNotificationReader
 from .state_store import StateStore
 
 
-PLACEHOLDER_MARKERS = ("替换", "example", "your_", "填写", "appid", "group_openid")
+PLACEHOLDER_MARKERS = ("替换", "example", "your_", "填写", "待绑定", "appid", "group_openid")
 
 
 def _entry(key: str, label: str, detail: str, status: str) -> dict[str, str]:
@@ -47,8 +47,8 @@ def _check_writable(path: Path) -> None:
         pass
 
 
-async def _check_bot_credentials(config: AppConfig) -> None:
-    sender = OfficialQqBotSender(config.destination)
+async def _check_bot_credentials(destination: Any) -> None:
+    sender = OfficialQqBotSender(destination)
     try:
         await sender.start()
     finally:
@@ -145,44 +145,42 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
     else:
         _append(report, "missing", "app_name", "QQ 应用识别规则", "app_name_contains 不能为空")
 
-    app_id_valid = not _looks_like_placeholder(config.destination.app_id)
-    group_valid = not _looks_like_placeholder(config.destination.group_openid)
-    if app_id_valid:
-        _append(report, "passed", "app_id", "机器人 AppID", "已填写")
-    else:
-        _append(report, "missing", "app_id", "机器人 AppID", "尚未填写有效的 AppID")
-    if group_valid:
-        value = config.destination.group_openid
-        preview = f"{value[:6]}…{value[-4:]}" if len(value) > 12 else "已填写"
-        _append(report, "passed", "group_openid", "QQ 群绑定", preview)
-    else:
-        _append(report, "missing", "group_openid", "QQ 群绑定", "尚未绑定 QQ 群 group_openid")
-
-    secret = os.environ.get(config.destination.client_secret_env)
-    if secret:
-        _append(
-            report,
-            "passed",
-            "client_secret",
-            "机器人密钥",
-            f"已读取环境变量 {config.destination.client_secret_env}",
-        )
-    elif config.runtime.dry_run:
-        _append(
-            report,
-            "warnings",
-            "client_secret",
-            "机器人密钥",
-            f"Dry-run 可继续；真实发送前需设置 {config.destination.client_secret_env}",
-        )
-    else:
-        _append(
-            report,
-            "missing",
-            "client_secret",
-            "机器人密钥",
-            f"当前 Web 控制面未读取环境变量 {config.destination.client_secret_env}",
-        )
+    _append(report, "passed", "destinations", "转发机器人", f"已配置 {len(config.destinations)} 个机器人目标")
+    bot_checks: list[tuple[Any, bool, bool, str | None]] = []
+    single_destination = len(config.destinations) == 1
+    for destination in config.destinations:
+        prefix = f"bot:{destination.bot_id}"
+        label = f"机器人 {destination.bot_id}"
+        key_prefix = "" if single_destination else prefix + ":"
+        app_id_valid = not _looks_like_placeholder(destination.app_id)
+        group_valid = not _looks_like_placeholder(destination.group_openid)
+        secret = read_user_environment_variable(destination.client_secret_env)
+        bot_checks.append((destination, app_id_valid, group_valid, secret))
+        if app_id_valid:
+            _append(report, "passed", f"{key_prefix}app_id", f"{label} AppID", "已填写")
+        else:
+            _append(report, "missing", f"{key_prefix}app_id", f"{label} AppID", "尚未填写有效的 AppID")
+        if group_valid:
+            value = destination.group_openid
+            preview = f"{value[:6]}…{value[-4:]}" if len(value) > 12 else "已填写"
+            _append(report, "passed", f"{key_prefix}group_openid", f"{label} QQ 群绑定", preview)
+        else:
+            _append(report, "missing", f"{key_prefix}group_openid", f"{label} QQ 群绑定", "尚未绑定 QQ 群 group_openid")
+        if secret:
+            _append(
+                report, "passed", f"{key_prefix}client_secret", f"{label}密钥",
+                f"已读取环境变量 {destination.client_secret_env}",
+            )
+        elif config.runtime.dry_run:
+            _append(
+                report, "warnings", f"{key_prefix}client_secret", f"{label}密钥",
+                f"Dry-run 可继续；真实发送前需设置 {destination.client_secret_env}",
+            )
+        else:
+            _append(
+                report, "missing", f"{key_prefix}client_secret", f"{label}密钥",
+                f"当前 Web 控制面未读取环境变量 {destination.client_secret_env}",
+            )
 
     if os.name == "nt" and sys.platform == "win32":
         _append(report, "passed", "windows", "Windows 环境", "当前正在 Windows 中运行")
@@ -281,15 +279,17 @@ def run_preflight(config_path: Path, *, verify_remote: bool = True) -> dict[str,
     elif config.source.backend == "napcat" and not verify_remote:
         _append(report, "warnings", "napcat_connection", "NapCat 连接与登录", "本次未执行联网验证")
 
-    can_verify_bot = bool(secret and app_id_valid)
-    if verify_remote and can_verify_bot:
-        try:
-            asyncio.run(_check_bot_credentials(config))
-            _append(report, "passed", "bot_connection", "机器人连接", "AppID 和密钥验证成功")
-        except Exception as exc:
-            target = "warnings" if config.runtime.dry_run else "missing"
-            _append(report, target, "bot_connection", "机器人连接", f"验证失败：{exc}")
-    elif not verify_remote:
-        _append(report, "warnings", "bot_connection", "机器人连接", "本次未执行联网验证")
+    for destination, app_id_valid, _group_valid, secret in bot_checks:
+        key = "bot_connection" if single_destination else f"bot:{destination.bot_id}:connection"
+        label = f"机器人 {destination.bot_id} 连接"
+        if verify_remote and secret and app_id_valid:
+            try:
+                asyncio.run(_check_bot_credentials(destination))
+                _append(report, "passed", key, label, "AppID 和密钥验证成功")
+            except Exception as exc:
+                target = "warnings" if config.runtime.dry_run else "missing"
+                _append(report, target, key, label, f"验证失败：{exc}")
+        elif not verify_remote:
+            _append(report, "warnings", key, label, "本次未执行联网验证")
 
     return {**report, "ready": not report["missing"]}

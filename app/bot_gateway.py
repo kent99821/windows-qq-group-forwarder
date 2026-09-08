@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 from typing import Any
 
 import httpx
 
 from .config import DestinationConfig
+from .environment import read_user_environment_variable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class GatewaySession:
 
 async def bind_group(destination: DestinationConfig, *, timeout_seconds: float = 90.0) -> str:
     """连接 QQ 网关，等待 QQ 群中 @机器人发送“绑定”，返回 group_openid。"""
-    secret = os.environ.get(destination.client_secret_env)
+    secret = read_user_environment_variable(destination.client_secret_env)
     if not secret:
         raise RuntimeError(f"环境变量 {destination.client_secret_env} 未设置")
     try:
@@ -106,9 +106,9 @@ async def bind_group(destination: DestinationConfig, *, timeout_seconds: float =
 
 async def run_gateway_forever(destination: DestinationConfig, stop_event: asyncio.Event) -> None:
     """保持机器人在线；SDK 连接异常时等待后重新建立网关连接。"""
-    secret = os.environ.get(destination.client_secret_env)
+    secret = read_user_environment_variable(destination.client_secret_env)
     if not secret:
-        LOGGER.error("机器人网关未启动：环境变量 %s 未设置", destination.client_secret_env)
+        LOGGER.error("机器人网关未启动 bot_id=%s：环境变量 %s 未设置", destination.bot_id, destination.client_secret_env)
         return
     try:
         from qqbot_agent_sdk import QQApiClient, QQWebSocket, WSCallbacks
@@ -125,13 +125,13 @@ async def run_gateway_forever(destination: DestinationConfig, stop_event: asynci
         failure = asyncio.Event()
 
         def on_fatal_error(code: str, message: str) -> None:
-            LOGGER.error("QQ 网关错误 code=%s message=%s", code, message)
+            LOGGER.error("QQ 网关错误 bot_id=%s code=%s message=%s", destination.bot_id, code, message)
             loop.call_soon_threadsafe(failure.set)
 
         callbacks = WSCallbacks(
             on_message_event=_ignore_message,
-            on_connected=lambda: LOGGER.info("QQ 机器人网关已连接"),
-            on_disconnected=lambda: LOGGER.warning("QQ 机器人网关已断开"),
+            on_connected=lambda: LOGGER.info("QQ 机器人网关已连接 bot_id=%s", destination.bot_id),
+            on_disconnected=lambda: LOGGER.warning("QQ 机器人网关已断开 bot_id=%s", destination.bot_id),
             on_fatal_error=on_fatal_error,
             get_token=api.ensure_token_sync,
             get_session=session.get,
@@ -155,15 +155,37 @@ async def run_gateway_forever(destination: DestinationConfig, stop_event: asynci
                 task.cancel()
             if stop_task in done:
                 break
-            LOGGER.warning("QQ 机器人网关将于 3 秒后重连")
+            LOGGER.warning("QQ 机器人网关将于 3 秒后重连 bot_id=%s", destination.bot_id)
             await asyncio.sleep(3)
         except Exception as exc:
-            LOGGER.error("QQ 机器人网关启动失败：%s", type(exc).__name__)
+            LOGGER.error("QQ 机器人网关启动失败 bot_id=%s：%s", destination.bot_id, type(exc).__name__)
             if not stop_event.is_set():
                 await asyncio.sleep(5)
         finally:
             await websocket.async_stop()
             await http_client.aclose()
+
+
+async def run_gateways_forever(
+    destinations: tuple[DestinationConfig, ...] | list[DestinationConfig],
+    stop_event: asyncio.Event,
+) -> None:
+    """Keep one independent gateway connection alive for every configured bot."""
+    tasks = [
+        asyncio.create_task(
+            run_gateway_forever(destination, stop_event),
+            name=f"qq-bot-gateway-{destination.bot_id}",
+        )
+        for destination in destinations
+    ]
+    if not tasks:
+        return
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _ignore_message(_event_type: str, _raw: dict[str, Any]) -> None:
