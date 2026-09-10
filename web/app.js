@@ -9,6 +9,19 @@ function show(message) {
 let replayMode = null;
 let replayListenerName = "";
 let preflightBusy = false;
+let sourceBackendDirty = false;
+
+function renderSourceBackendEditor(savedBackend, running) {
+  const select = $("source-backend");
+  if (running) sourceBackendDirty = false;
+  if (!sourceBackendDirty) select.value = savedBackend;
+  select.disabled = running;
+  $("save-source-backend").disabled = running || !sourceBackendDirty;
+  const displayedBackend = select.value || savedBackend;
+  const label = displayedBackend === "napcat" ? "NapCat OneBot" : "Windows 通知";
+  $("source-backend-badge").textContent = sourceBackendDirty ? `${label} · 未保存` : label;
+  $("napcat-settings").hidden = displayedBackend !== "napcat";
+}
 
 function setButtonBusy(button, busy, loadingText = "处理中…") {
   if (!button) return;
@@ -74,11 +87,7 @@ async function refreshStatus() {
       || credentialWarning
       || (status.external_instance ? "已有其他窗口启动的转发服务，请在原窗口停止后再操作。" : (status.config_exists ? status.config_path : "未找到 config.toml"));
     const backend = status.source_backend || "windows_notification";
-    $("source-backend").value = backend;
-    $("source-backend").disabled = running;
-    $("save-source-backend").disabled = running;
-    $("source-backend-badge").textContent = backend === "napcat" ? "NapCat OneBot" : "Windows 通知";
-    $("napcat-settings").hidden = backend !== "napcat";
+    renderSourceBackendEditor(backend, running);
     if (status.napcat) {
       if (document.activeElement !== $("napcat-ws-url")) $("napcat-ws-url").value = status.napcat.ws_url || "";
       if (document.activeElement !== $("napcat-token-env")) $("napcat-token-env").value = status.napcat.token_env || "";
@@ -204,10 +213,12 @@ function renderNapcatSessions(sessions, running) {
 
 async function saveSourceBackend() {
   await runButtonTask($("save-source-backend"), "保存中…", async () => {
+    const backend = $("source-backend").value;
     await request("/api/actions/source-backend", {
       method: "POST",
-      body: JSON.stringify({ backend: $("source-backend").value }),
+      body: JSON.stringify({ backend }),
     });
+    sourceBackendDirty = false;
     show("消息来源已保存，启动服务时生效");
     await refreshStatus();
   });
@@ -533,6 +544,10 @@ $("stop-button").addEventListener("click", () => action("/api/actions/stop"));
 $("restart-button").addEventListener("click", () => action("/api/actions/restart"));
 $("preflight-button").addEventListener("click", runPreflight);
 $("save-source-backend").addEventListener("click", saveSourceBackend);
+$("source-backend").addEventListener("change", () => {
+  sourceBackendDirty = true;
+  renderSourceBackendEditor($("source-backend").value, false);
+});
 $("save-napcat").addEventListener("click", saveNapcatSettings);
 $("add-napcat-session").addEventListener("click", addNapcatSession);
 $("add-destination-button").addEventListener("click", addDestination);

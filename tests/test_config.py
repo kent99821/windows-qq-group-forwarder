@@ -8,6 +8,7 @@ from app.config import (
     save_dry_run,
     save_listener_names,
     save_listener_sessions,
+    save_source_backend,
 )
 
 
@@ -223,3 +224,12 @@ def test_multiple_destinations_load_and_save(tmp_path: Path) -> None:
     ]
     assert config.destination.bot_id == "bot-1"
     assert "[destination]" not in path.read_text(encoding="utf-8")
+
+
+def test_save_source_backend_persists_napcat(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    write_config(path)
+
+    save_source_backend(path, "napcat")
+
+    assert load_config(path).source.backend == "napcat"
