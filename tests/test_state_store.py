@@ -95,3 +95,35 @@ def test_message_has_independent_delivery_status_per_bot(tmp_path: Path) -> None
         assert [str(row["bot_id"]) for row in store.pending_deliveries("multi")] == ["bot-2"]
     finally:
         store.close()
+
+
+def test_history_watermark_advances_only_after_all_earlier_rows_are_sent(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    try:
+        first = IncomingMessage.create("history-1", "A 群", "第一条", history_key="history-1")
+        second = IncomingMessage.create("history-2", "A 群", "第二条", history_key="history-2")
+        store.enqueue(first, ["bot-1"])
+        store.enqueue(second, ["bot-1"])
+        store.mark_delivery_sent("history-2", "bot-1")
+
+        assert store.advance_history_watermark("history-2") is False
+        assert store.history_watermark("A 群") is None
+
+        store.mark_delivery_sent("history-1", "bot-1")
+        assert store.advance_history_watermark("history-1") is True
+        assert store.history_watermark("A 群") == "history-2"
+        assert store.advance_history_watermark("history-2") is False
+    finally:
+        store.close()
+
+
+def test_history_status_is_available_to_scrolled_reader(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    try:
+        message = IncomingMessage.create("history-1", "A 群", "第一条", history_key="history-1")
+        store.enqueue(message, ["bot-1"])
+        assert store.history_message_status("history-1") == "pending"
+        store.mark_delivery_sent("history-1", "bot-1")
+        assert store.history_message_status("history-1") == "sent"
+    finally:
+        store.close()

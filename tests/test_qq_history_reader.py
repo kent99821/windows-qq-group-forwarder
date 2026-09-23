@@ -5,9 +5,13 @@ from app.source.qq_history_reader import (
     bootstrap_history_from_notifications,
     history_delta,
     merge_history_snapshots,
+    merge_scrolled_history_snapshots,
     merge_notifications_with_history,
     parse_history_nodes,
+    _record_key,
+    QqHistoryReader,
 )
+from app.state_store import StateStore
 
 
 def node(
@@ -134,6 +138,56 @@ def test_stable_snapshots_keep_rows_that_scroll_out_while_new_rows_arrive() -> N
         "第4条",
         "第5条",
     ]
+
+
+def test_scrolled_snapshots_are_reassembled_from_oldest_to_newest() -> None:
+    newest = [
+        HistoryRecord("发家致富", "家欣", f"第{i}条", "19:13", "history_text", 1)
+        for i in (7, 8, 9)
+    ]
+    older = [
+        HistoryRecord("发家致富", "家欣", f"第{i}条", "19:13", "history_text", 1)
+        for i in (4, 5, 6, 7)
+    ]
+    oldest = [
+        HistoryRecord("发家致富", "家欣", f"第{i}条", "19:13", "history_text", 1)
+        for i in (1, 2, 3, 4)
+    ]
+
+    merged = merge_scrolled_history_snapshots([newest, older, oldest])
+
+    assert [record.content for record in merged] == [f"第{i}条" for i in range(1, 10)]
+
+
+def test_scrolled_snapshots_do_not_duplicate_a_repeated_page() -> None:
+    page = [
+        HistoryRecord("发家致富", "家欣", f"第{i}条", "19:13", "history_text", 1)
+        for i in (1, 2, 3)
+    ]
+
+    merged = merge_scrolled_history_snapshots([page, page])
+
+    assert [record.content for record in merged] == ["第1条", "第2条", "第3条"]
+
+
+def test_persistent_source_watermark_returns_only_following_history(tmp_path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    try:
+        reader = QqHistoryReader.__new__(QqHistoryReader)
+        reader.store = store
+        reader._primed = {"发家致富"}
+        reader._last_visible = {}
+        old = HistoryRecord("发家致富", "家欣", "旧消息", "12:00", "history_text", 1)
+        new = HistoryRecord("发家致富", "家欣", "新消息", "12:01", "history_text", 1)
+        store.set_history_watermark("发家致富", _record_key(old))
+        reader.read_visible = lambda source_group, settle_seconds=0.0: [old, new]
+
+        records, visible = reader._new_history("发家致富", [])
+
+        assert [record.content for record in records] == ["新消息"]
+        assert visible == [old, new]
+    finally:
+        store.close()
 
 
 def test_failed_startup_baseline_recovers_whole_notification_time_bucket() -> None:

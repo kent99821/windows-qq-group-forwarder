@@ -106,6 +106,12 @@ async def process_pending(
                         break
                     await asyncio.sleep(min(2 ** offset, 10))
         if store.message_fully_sent(key):
+            if store.advance_history_watermark(key):
+                logger.debug(
+                    "已推进来源消息水位 source_group=%s key=%s",
+                    row["source_group"],
+                    key[:12],
+                )
             media_path = row["media_path"]
             if media_path:
                 staged_path = Path(str(media_path))
@@ -333,7 +339,7 @@ async def run(config: AppConfig, *, dry_run: bool = False) -> None:
             )
         else:
             reader = WindowsNotificationReader(config.source)
-            history_reader = QqHistoryReader(config.source)
+            history_reader = QqHistoryReader(config.source, store)
             image_cache = QqImageCache(config.source)
             window_image_reader = QqWindowImageReader(config.source)
         senders: dict[str, OfficialQqBotSender] = {}

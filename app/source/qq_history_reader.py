@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from ..config import SourceConfig
 from ..models import IncomingMessage
+from ..state_store import StateStore
 from .qq_ui_lock import QQ_UI_LOCK
 from .qq_window_image import QqWindowImageReader, _normal
 
@@ -245,6 +246,50 @@ def merge_history_snapshots(
     return merged
 
 
+def merge_scrolled_history_snapshots(
+    snapshots: Iterable[Iterable[HistoryRecord]],
+) -> list[HistoryRecord]:
+    """Merge snapshots read from newest to oldest while preserving chat order.
+
+    The first snapshot is the current bottom of the chat.  Every following
+    snapshot is older because the QQ message list was scrolled upward.  The
+    overlap therefore is the *suffix* of the older page against the *prefix*
+    of the already merged newer pages.
+    """
+    merged: list[HistoryRecord] = []
+    for snapshot in snapshots:
+        current = list(snapshot)
+        if not current:
+            continue
+        if not merged:
+            merged = current
+            continue
+
+        overlap = _history_overlap(current, merged)
+        if overlap:
+            merged = current[:-overlap] + merged
+            continue
+
+        current_tokens = [_history_token(record) for record in current]
+        merged_tokens = [_history_token(record) for record in merged]
+        if _is_contiguous_subsequence(current_tokens, merged_tokens):
+            continue
+
+        # A page boundary can briefly expose no common row. Remove only the
+        # number of already-known token occurrences, then prepend the older
+        # rows. This avoids multiplying rows when QQ returns a repeated page.
+        known = Counter(merged_tokens)
+        older: list[HistoryRecord] = []
+        for record in current:
+            token = _history_token(record)
+            if known[token]:
+                known[token] -= 1
+                continue
+            older.append(record)
+        merged = older + merged
+    return merged
+
+
 def _history_token(record: HistoryRecord) -> tuple[str, str, str]:
     # Sender and display time disappear from partially visible top rows in QQ
     # NT, so sequence matching deliberately uses only stable visible fields.
@@ -339,6 +384,7 @@ def merge_notifications_with_history(
             record.content,
             sender=record.sender,
             kind=record.kind,
+            history_key=_record_key(record),
         )
         for record in new_history
     ]
@@ -359,8 +405,9 @@ def merge_notifications_with_history(
 class QqHistoryReader:
     """Use a notification as a trigger, then backfill visible QQ chat rows."""
 
-    def __init__(self, config: SourceConfig) -> None:
+    def __init__(self, config: SourceConfig, store: StateStore | None = None) -> None:
         self.config = config
+        self.store = store
         self._window_reader = QqWindowImageReader(config)
         self._last_visible: dict[str, list[HistoryRecord]] = {
             name: [] for name in config.listener_names
@@ -468,6 +515,32 @@ class QqHistoryReader:
         nodes = [self._control_node(control) for control in message_window.children()]
         return parse_history_nodes(nodes, int(rect.left), int(rect.right), source_group)
 
+    @staticmethod
+    def _scroll_up(message_window: Any) -> bool:
+        try:
+            from pywinauto import mouse
+
+            rect = message_window.rectangle()
+            center = ((int(rect.left) + int(rect.right)) // 2, (int(rect.top) + int(rect.bottom)) // 2)
+            mouse.move(coords=center)
+            mouse.scroll(coords=center, wheel_dist=5)
+            return True
+        except Exception:
+            try:
+                message_window.set_focus()
+                message_window.type_keys("{PGUP}")
+                return True
+            except Exception:
+                return False
+
+    @staticmethod
+    def _scroll_bottom(message_window: Any) -> None:
+        try:
+            message_window.set_focus()
+            message_window.type_keys("{END}")
+        except Exception:
+            return
+
     def _read_visible_unlocked(
         self,
         source_group: str,
@@ -478,23 +551,61 @@ class QqHistoryReader:
             LOGGER.warning("聊天补读失败：未找到 QQ NT 主窗口 source_group=%s", source_group)
             return None
         state = self._desktop_state(qq_window)
+        message_window: Any | None = None
         try:
             window = self._window_reader._open_group(source_group)
             if window is None:
                 return None
             time.sleep(0.25)
+            message_window = self._message_window(window)
+            if message_window is None:
+                LOGGER.warning("聊天补读失败：未找到 QQ 消息列表 source_group=%s", source_group)
+                return None
             first = self._snapshot_records(window, source_group)
             if first is None:
                 return None
-            snapshots = [first]
+            settle_snapshots = [first]
             deadline = time.monotonic() + max(0.0, settle_seconds)
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 time.sleep(min(HISTORY_SETTLE_INTERVAL_SECONDS, remaining))
                 snapshot = self._snapshot_records(window, source_group)
                 if snapshot is not None:
-                    snapshots.append(snapshot)
-            return merge_history_snapshots(snapshots)
+                    settle_snapshots.append(snapshot)
+
+            latest = merge_history_snapshots(settle_snapshots)
+            snapshots = [latest]
+            previous_tokens = [_history_token(record) for record in latest]
+            unchanged_pages = 0
+            watermark = self.store.history_watermark(source_group) if self.store else None
+            merged_snapshot = latest
+            watermark_found = bool(
+                watermark and any(_record_key(record) == watermark for record in merged_snapshot)
+            )
+            for _ in range(self.config.history_scroll_pages):
+                if watermark_found:
+                    break
+                if not self._scroll_up(message_window):
+                    break
+                time.sleep(0.2)
+                snapshot = self._snapshot_records(window, source_group)
+                if snapshot is None:
+                    break
+                snapshots.append(snapshot)
+                current_tokens = [_history_token(record) for record in snapshot]
+                if current_tokens == previous_tokens:
+                    unchanged_pages += 1
+                else:
+                    unchanged_pages = 0
+                previous_tokens = current_tokens
+
+                merged_snapshot = merge_scrolled_history_snapshots(snapshots)
+                watermark_found = bool(
+                    watermark and any(_record_key(record) == watermark for record in merged_snapshot)
+                )
+                if unchanged_pages >= 2:
+                    break
+            return merged_snapshot
         except Exception as exc:
             LOGGER.warning(
                 "聊天补读失败 source_group=%s error=%s",
@@ -503,6 +614,8 @@ class QqHistoryReader:
             )
             return None
         finally:
+            if message_window is not None:
+                self._scroll_bottom(message_window)
             self._restore_desktop_state(state)
 
     def read_visible(
@@ -521,6 +634,9 @@ class QqHistoryReader:
                 continue
             self._last_visible[source_group] = visible
             self._primed.add(source_group)
+            watermark = self.store.history_watermark(source_group) if self.store else None
+            if self.store and watermark is None and visible:
+                self.store.set_history_watermark(source_group, _record_key(visible[-1]))
             LOGGER.info(
                 "QQ 聊天补读基线已建立 source_group=%s visible_count=%d",
                 source_group,
@@ -535,6 +651,35 @@ class QqHistoryReader:
         visible = self.read_visible(source_group, HISTORY_SETTLE_SECONDS)
         if visible is None:
             return [], None
+
+        watermark = self.store.history_watermark(source_group) if self.store else None
+        if watermark:
+            keys = [_record_key(record) for record in visible]
+            try:
+                watermark_index = keys.index(watermark)
+            except ValueError:
+                new_records = [
+                    record
+                    for record in visible
+                    if self.store.history_message_status(_record_key(record)) != "sent"
+                ]
+                LOGGER.info(
+                    "QQ 聊天补读水位已滚出当前读取范围，按发送状态补偿 source_group=%s count=%d",
+                    source_group,
+                    len(new_records),
+                )
+            else:
+                new_records = visible[watermark_index + 1:]
+            self._last_visible[source_group] = visible
+            self._primed.add(source_group)
+            if new_records:
+                LOGGER.info(
+                    "QQ 聊天补读发现水位之后新增消息 source_group=%s count=%d",
+                    source_group,
+                    len(new_records),
+                )
+            return new_records, visible
+
         if source_group not in self._primed:
             recovered = bootstrap_history_from_notifications(notifications, visible)
             self._last_visible[source_group] = visible
@@ -549,6 +694,11 @@ class QqHistoryReader:
             LOGGER.warning("QQ 聊天补读延迟建立基线，本批次保留 Windows 通知 source_group=%s", source_group)
             return [], None
         previous = self._last_visible.get(source_group, [])
+        if not previous:
+            if self.store and visible:
+                self.store.set_history_watermark(source_group, _record_key(visible[-1]))
+            self._last_visible[source_group] = visible
+            return [], None
         new_records = history_delta(previous, visible)
         self._last_visible[source_group] = visible
         if new_records:

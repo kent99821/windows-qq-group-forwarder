@@ -21,6 +21,8 @@ image_cache_settle_seconds = 0.25
 image_cache_wait_seconds = 45.0
 # UI 自动打开群聊并复制图片的最长等待时间。
 ui_image_wait_seconds = 8.0
+# 每次收到通知后，向上滚动读取的最大历史分页数；0 表示只读当前可视区域。
+history_scroll_pages = 20
 
 [[destinations]]
 # bot_id 必须唯一；同一个机器人只能配置一次。

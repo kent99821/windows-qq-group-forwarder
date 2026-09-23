@@ -173,6 +173,7 @@ group_names = ["发家致富", "第二个群", "联系人昵称"] # 兼容旧配
 | `source.image_cache_settle_seconds` | 图片文件稳定等待时间 | 文件写入完成前的等待时间 |
 | `source.image_cache_wait_seconds` | 等待图片缓存时间 | 收到图片通知后最多扫描多久 |
 | `source.ui_image_wait_seconds` | QQ 窗口复制图片超时 | UI 自动复制图片的最长等待时间 |
+| `source.history_scroll_pages` | 历史补读滚动页数 | 收到通知后最多向上滚动读取的分页数；`0` 表示只读取当前可视区域，数值越大覆盖的历史越多但 QQ 窗口操作时间更长 |
 | `destinations[].bot_id` | 机器人唯一标识 | 同一实例内不能重复；建议使用 `bot-1`、`bot-2` |
 | `destinations[].app_id` | QQ 官方机器人的 AppID | 不要填写机器人名称 |
 | `destinations[].client_secret_env` | 保存密钥的环境变量名 | 只填写变量名，不要填写密钥本身 |

@@ -43,6 +43,7 @@ class SourceConfig:
     listener_names: tuple[str, ...] = ()
     backend: str = "windows_notification"
     sessions: tuple[ListenerSession, ...] = ()
+    history_scroll_pages: int = 2
 
     def __post_init__(self) -> None:
         # listener_names 是通用配置名；group_names/group_name 保留用于兼容旧配置。
@@ -197,6 +198,7 @@ def load_config(path: Path) -> AppConfig:
     image_cache_settle_seconds = source.get("image_cache_settle_seconds", 0.25)
     image_cache_wait_seconds = source.get("image_cache_wait_seconds", 45.0)
     ui_image_wait_seconds = source.get("ui_image_wait_seconds", 8.0)
+    history_scroll_pages = source.get("history_scroll_pages", 20)
     if not isinstance(image_cache_match_seconds, (int, float)) or image_cache_match_seconds <= 0:
         raise ValueError("image_cache_match_seconds 必须是正数")
     if not isinstance(image_cache_settle_seconds, (int, float)) or image_cache_settle_seconds < 0:
@@ -205,6 +207,8 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("image_cache_wait_seconds 必须是非负数")
     if not isinstance(ui_image_wait_seconds, (int, float)) or ui_image_wait_seconds <= 0:
         raise ValueError("ui_image_wait_seconds 必须是正数")
+    if not isinstance(history_scroll_pages, int) or history_scroll_pages < 0:
+        raise ValueError("history_scroll_pages 必须是非负整数")
 
     sessions_raw = source.get("sessions", [])
     if not isinstance(sessions_raw, list):
@@ -293,6 +297,7 @@ def load_config(path: Path) -> AppConfig:
             listener_names=listener_names,
             backend=backend,
             sessions=tuple(sessions),
+            history_scroll_pages=history_scroll_pages,
         ),
         destination=destinations[0],
         runtime=RuntimeConfig(

@@ -13,6 +13,7 @@ class IncomingMessage:
     kind: str = "text"
     observed_at: str = ""
     media_path: str | None = None
+    history_key: str | None = None
 
     @classmethod
     def create(
@@ -23,6 +24,7 @@ class IncomingMessage:
         sender: str | None = None,
         kind: str = "text",
         media_path: str | None = None,
+        history_key: str | None = None,
     ) -> "IncomingMessage":
         return cls(
             message_key=message_key,
@@ -32,4 +34,5 @@ class IncomingMessage:
             kind=kind,
             observed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             media_path=media_path,
+            history_key=history_key,
         )

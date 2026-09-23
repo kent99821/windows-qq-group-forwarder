@@ -24,6 +24,7 @@ class StateStore:
                 media_path TEXT,
                 status TEXT NOT NULL,
                 observed_at TEXT NOT NULL,
+                history_key TEXT,
                 sent_at TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT
@@ -43,11 +44,22 @@ class StateStore:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_watermarks (
+                source_group TEXT PRIMARY KEY,
+                history_key TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         columns = {
             str(row[1]) for row in self.connection.execute("PRAGMA table_info(messages)").fetchall()
         }
         if "media_path" not in columns:
             self.connection.execute("ALTER TABLE messages ADD COLUMN media_path TEXT")
+        if "history_key" not in columns:
+            self.connection.execute("ALTER TABLE messages ADD COLUMN history_key TEXT")
         self.connection.commit()
 
     def close(self) -> None:
@@ -57,10 +69,10 @@ class StateStore:
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO messages
-            (message_key, source_group, sender, kind, content, media_path, status, observed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            (message_key, source_group, sender, kind, content, media_path, status, observed_at, history_key)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
-            (message.message_key, message.source_group, message.sender, message.kind, message.content, message.media_path, message.observed_at),
+            (message.message_key, message.source_group, message.sender, message.kind, message.content, message.media_path, message.observed_at, message.history_key),
         )
         if cursor.rowcount == 1 and bot_ids:
             self._ensure_deliveries(message.message_key, bot_ids, default_status="pending")
@@ -77,8 +89,8 @@ class StateStore:
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO messages
-            (message_key, source_group, sender, kind, content, media_path, status, observed_at, last_error)
-            VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, ?)
+            (message_key, source_group, sender, kind, content, media_path, status, observed_at, history_key, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)
             """,
             (
                 message.message_key,
@@ -88,6 +100,7 @@ class StateStore:
                 message.content,
                 message.media_path,
                 message.observed_at,
+                message.history_key,
                 error[:1000],
             ),
         )
@@ -202,6 +215,127 @@ class StateStore:
     def message_fully_sent(self, message_key: str) -> bool:
         rows = self.deliveries(message_key)
         return bool(rows) and all(str(row["status"]) == "sent" for row in rows)
+
+    def history_watermark(self, source_group: str) -> str | None:
+        """Return the last history row fully delivered for one source.
+
+        History reconciliation runs in a worker thread because UI Automation is
+        blocking.  Use a short-lived read connection here instead of sharing
+        the StateStore connection across threads.
+        """
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT history_key FROM source_watermarks WHERE source_group = ?",
+                (source_group,),
+            ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def set_history_watermark(self, source_group: str, history_key: str) -> None:
+        if not source_group.strip() or not history_key.strip():
+            return
+        self.connection.execute(
+            """
+            INSERT INTO source_watermarks (source_group, history_key, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_group) DO UPDATE SET
+                history_key = excluded.history_key,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (source_group, history_key),
+        )
+        self.connection.commit()
+
+    def history_message_status(self, history_key: str) -> str | None:
+        """Return the persisted delivery status for a history row, if known."""
+        if not history_key.strip():
+            return None
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT status
+                FROM messages
+                WHERE history_key = ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (history_key,),
+            ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def advance_history_watermark(self, message_key: str) -> bool:
+        """Advance a source watermark without skipping an earlier unsent row."""
+        target = self.connection.execute(
+            """
+            SELECT rowid, source_group, history_key, status
+            FROM messages
+            WHERE message_key = ?
+            """,
+            (message_key,),
+        ).fetchone()
+        if target is None or not target["history_key"] or target["status"] != "sent":
+            return False
+
+        source_group = str(target["source_group"])
+        target_rowid = int(target["rowid"])
+        blocked = self.connection.execute(
+            """
+            SELECT 1
+            FROM messages
+            WHERE source_group = ?
+              AND history_key IS NOT NULL
+              AND rowid <= ?
+              AND status != 'sent'
+            LIMIT 1
+            """,
+            (source_group, target_rowid),
+        ).fetchone()
+        if blocked is not None:
+            return False
+
+        current = self.connection.execute(
+            """
+            SELECT m.rowid
+            FROM source_watermarks AS w
+            JOIN messages AS m
+              ON m.source_group = w.source_group
+             AND m.history_key = w.history_key
+            WHERE w.source_group = ?
+            ORDER BY m.rowid DESC
+            LIMIT 1
+            """,
+            (source_group,),
+        ).fetchone()
+        if current is not None and int(current[0]) >= target_rowid:
+            return False
+
+        latest_history_key = str(target["history_key"])
+        for row in self.connection.execute(
+            """
+            SELECT history_key, status
+            FROM messages
+            WHERE source_group = ?
+              AND history_key IS NOT NULL
+              AND rowid >= ?
+            ORDER BY rowid
+            """,
+            (source_group, target_rowid),
+        ):
+            if row["status"] != "sent":
+                break
+            latest_history_key = str(row["history_key"])
+
+        self.connection.execute(
+            """
+            INSERT INTO source_watermarks (source_group, history_key, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_group) DO UPDATE SET
+                history_key = excluded.history_key,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (source_group, latest_history_key),
+        )
+        self.connection.commit()
+        return True
 
     def failed(self, limit: int = 100) -> list[sqlite3.Row]:
         return list(self.connection.execute(
